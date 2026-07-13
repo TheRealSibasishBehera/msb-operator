@@ -1,0 +1,1051 @@
+# Microsandbox Kubernetes Operator — Design Document
+
+## Table of Contents
+
+- [Summary](#summary)
+- [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+- [Proposal](#proposal)
+- [Design Details](#design-details)
+  - [System Overview](#system-overview)
+  - [Sandbox Creation](#sandbox-creation)
+  - [Sandbox Termination](#sandbox-termination)
+  - [Daemon Crash and Re-adoption](#daemon-crash-and-re-adoption)
+  - [Component Map](#component-map)
+  - [Component Design](#component-design)
+    - [msb-controller](#msb-controller)
+    - [msb-daemon](#msb-daemon)
+    - [msb-prerunner (init container)](#msb-prerunner-init-container)
+    - [Device Plugin](#device-plugin)
+  - [CRD Specification](#crd-specification)
+    - [runPolicy](#runpolicy)
+  - [Storage Model](#storage-model)
+    - [What the guest filesystem looks like](#what-the-guest-filesystem-looks-like)
+    - [Node-local files via hostPath](#node-local-files-via-hostpath)
+    - [The three storage layers](#the-three-storage-layers)
+    - [Image cache](#image-cache)
+    - [Writable upper layer](#writable-upper-layer)
+    - [Named volumes](#named-volumes)
+    - [Node pinning policy](#node-pinning-policy)
+  - [State Model](#state-model)
+    - [State ownership](#state-ownership)
+    - [Failure modes](#failure-modes)
+    - [Sandbox lifecycle state machine](#sandbox-lifecycle-state-machine)
+    - [Run policy](#run-policy)
+  - [Network Stack](#network-stack)
+    - [How microsandbox networking works in a pod](#how-microsandbox-networking-works-in-a-pod)
+    - [Network knobs](#network-knobs)
+  - [Security Model](#security-model)
+    - [Pod security context](#pod-security-context)
+    - [How secrets work](#how-secrets-work)
+    - [Secret handling chain in Kubernetes](#secret-handling-chain-in-kubernetes)
+    - [RBAC](#rbac)
+  - [Sandbox Access and SDK Integration](#sandbox-access-and-sdk-integration)
+    - [How the SDK reaches a running sandbox](#how-the-sdk-reaches-a-running-sandbox)
+    - [Protocol wire format](#protocol-wire-format)
+    - [Access options from outside the pod](#access-options-from-outside-the-pod)
+    - [V1: WebSocket bridge sidecar](#v1-websocket-bridge-sidecar)
+  - [Deployment](#deployment)
+    - [Helm chart contents](#helm-chart-contents)
+    - [Node requirements](#node-requirements)
+    - [Port publishing](#port-publishing)
+- [Risks and Mitigations](#risks-and-mitigations)
+- [Alternatives](#alternatives)
+  - [exec-based vs socket API for msb management](#exec-based-vs-socket-api-for-msb-management)
+  - [Sidecar vs daemon-level bridge](#sidecar-vs-daemon-level-bridge)
+  - [Node-local storage vs PVC-backed storage](#node-local-storage-vs-pvc-backed-storage)
+  - [Webhook admission vs CEL rules](#webhook-admission-vs-cel-rules)
+- [Open Questions](#open-questions)
+- [References](#references)
+
+---
+
+## Summary
+
+This document describes the design for a Kubernetes operator that exposes microsandbox microVM sandboxes as a first-class Kubernetes resource: a `Sandbox` CRD. Workloads running in a cluster can schedule ephemeral sandboxes the same way they schedule Pods today, with full access to Kubernetes-native primitives: namespaces, RBAC, Secrets, ResourceQuotas, and Services.
+
+---
+
+## Motivation
+
+Microsandbox runs sandboxes as lightweight microVMs using [libkrun](https://github.com/containers/libkrun) (KVM on Linux). Each sandbox is an `msb` process that boots a guest via libkrun/KVM, runs an in-process [smoltcp](https://github.com/smoltcp-rs/smoltcp) TCP/IP stack to intercept all guest network traffic, and enforces egress policy, secret substitution, and optional TLS interception. All of this runs in the host process, invisible to the guest.
+
+Running `msb` inside Kubernetes pods is non-trivial: it requires KVM device access, specific Linux capabilities, and careful handling of secrets and node-local storage.
+
+### Goals
+
+- Schedule and manage microsandbox microVMs as `Sandbox` CRDs via a Kubernetes-native API
+- Expose `/dev/kvm` availability to the scheduler via a device plugin so sandbox pods land only on KVM-capable nodes
+- Inject Kubernetes `Secret` values into the sandbox at runtime without storing them in the CRD spec
+- Preserve the full microsandbox network stack (smoltcp, TLS interception, secret substitution, egress policy) inside the pod, with no functionality regression
+- Ship as a Helm chart with minimal dependencies (no service mesh, no ingress controller, no storage classes)
+
+### Non-Goals
+
+- **Live migration**: sandboxes are ephemeral; kill and reschedule
+- **General-purpose PVC integration**: no StorageClass provisioning, no shared network storage (NFS/Ceph), no automatic data migration across nodes. Named volumes are node-local in V1 and stay outside Kubernetes' storage jurisdiction by design.
+- **Hotplug**: `msb` has no hotplug support for CPU, memory, or devices; spec is sealed at boot
+- **Sandbox-to-sandbox networking**: same isolation model as local `msb`
+- **macOS nodes**: Kubernetes does not support macOS as a node OS
+
+---
+
+## Proposal
+
+The operator has three components, each owning a distinct concern.
+
+The **controller** watches CRDs cluster-wide, creates pods, and syncs status. It is stateless and restartable; all durable state lives in the Kubernetes API.
+
+The **daemon** runs on every node. `msb` must exec on the same machine as `/dev/kvm`; the process that starts it, tracks the PID, and reports its exit must be co-located. The daemon is the bridge between a node-local OS process and the Kubernetes API.
+
+The **prerunner init container** resolves secrets. Secret values cannot be stored in the CRD spec or passed as env vars; they must be injected into a typed JSON config before `msb` starts. An init container runs once per pod under a namespace-scoped ServiceAccount and hands off a fully resolved config file to the runtime container over a shared `emptyDir`.
+
+One sandbox = one pod. The pod contains an init container (prerunner) and two containers (msb-runtime, msb-bridge). The `msb-runtime` container launches `msb` in detached mode; the daemon watches the pod, reads the PID from SQLite, and surfaces termination state back to the controller via pod annotations. The controller is the sole writer of CRD status. Secrets never appear in the pod spec, env vars, or logs; they are resolved at runtime by the prerunner and passed to `msb` over a file descriptor.
+
+---
+
+## Design Details
+
+The operator is implemented in Rust using [`kube-rs`](https://github.com/kube-rs/kube) (`kube::runtime::Controller`). Device plugin gRPC bindings are generated with `tonic` + `prost` from the upstream [`device_plugin.proto`](https://github.com/kubernetes/kubelet/blob/master/pkg/apis/deviceplugin/v1beta1/api.proto).
+
+### System Overview
+
+```mermaid
+graph TB
+    subgraph cluster["Kubernetes Cluster"]
+        api["Kubernetes API Server"]
+        ctrl["msb-controller<br/>Deployment · leader election"]
+
+        subgraph nodeA["Node A — KVM capable"]
+            daemon["msb-daemon DaemonSet<br/>── device plugin (/dev/kvm)<br/>── msb start (detached) · PID tracking · re-adopt on restart"]
+            kubelet["kubelet"]
+
+            subgraph pod["Sandbox Pod"]
+                prerunner["init: msb-prerunner<br/>resolve secrets<br/>write config<br/>copy msb binary + libkrunfw"]
+                runtime["msb-runtime<br/>msb start (detached)<br/>libkrun · guest VM<br/>smoltcp proxy"]
+                bridge["msb-bridge<br/>WebSocket → agent.sock<br/>port configurable (default 7000)"]
+            end
+
+        end
+
+        subgraph nodeB["Node B — no /dev/kvm"]
+            daemonB["msb-daemon<br/>(device plugin: kvm-0 Unhealthy → capacity 0)"]
+        end
+    end
+
+    user(["user / workload"])
+
+    user -->|"kubectl apply Sandbox CRD"| api
+    api <-->|"watch CRDs / patch status"| ctrl
+    ctrl -->|"create Pod"| api
+    api -->|"schedule to KVM node"| nodeA
+    daemon -->|"patch pod annotations"| api
+    kubelet <-->|"ListAndWatch / Allocate"| daemon
+    prerunner -->|"emptyDir: sandbox.json + msb bin + libkrunfw"| runtime
+    runtime -->|"agent.sock (emptyDir)"| bridge
+```
+
+### Sandbox Creation
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant API as k8s API Server
+    participant Ctrl as msb-controller
+    participant Daemon as msb-daemon
+    participant Pre as msb-prerunner
+    participant Runtime as msb-runtime
+
+    User->>API: kubectl apply Sandbox CRD
+    API-->>Ctrl: watch event (new Sandbox)
+    Ctrl->>Ctrl: validate spec
+    Ctrl->>API: create sandbox Pod (requests devices.microsandbox.io/kvm: 1)
+    Ctrl->>API: patch Sandbox.status.phase = Pending
+    API->>API: schedule Pod to KVM-capable node
+
+    Note over Pre: init container starts
+    Pre->>API: get Secret values (secretKeyRef)
+    API-->>Pre: secret values
+    Pre->>Pre: write /msb-config/sandbox.json (mode 0600), copy msb binary, copy libkrunfw.so
+    Note over Pre: exit(0) — kubelet starts main containers
+
+    Note over Runtime: msb-runtime container starts
+    Runtime->>Runtime: read sandbox.json from emptyDir, exec msb start (config via fd 96, not argv)
+    Runtime->>Runtime: libkrun boots guest VM, smoltcp proxy starts
+
+    API-->>Daemon: watch event — Pod Running on this node
+    Daemon->>Daemon: record PID from SQLite in node-local state
+
+    API-->>Ctrl: Pod phase → Running
+    Ctrl->>API: patch Sandbox.status.phase = Running
+    API-->>User: Sandbox.status.phase = Running
+```
+
+### Sandbox Termination
+
+```mermaid
+sequenceDiagram
+    participant Runtime as msb-runtime
+    participant Daemon as msb-daemon
+    participant API as k8s API Server
+    participant Ctrl as msb-controller
+
+    Runtime->>Runtime: guest exits, msb process exits (code 0)
+    Daemon->>Daemon: waitpid detects msb child exit
+    Daemon->>Daemon: read termination reason from node-local state
+    Daemon->>API: annotate Pod: microsandbox.io/termination-reason=Completed
+    API-->>Ctrl: Pod phase → Succeeded
+    Ctrl->>Ctrl: read termination reason from Pod annotation
+    Ctrl->>API: patch Sandbox.status: phase=Succeeded, terminationReason=Completed
+    Note over Ctrl: status patch BEFORE CRD deletion — annotation is lost once pod is GC'd
+    alt ephemeral: true
+        Ctrl->>API: delete Sandbox CRD (owner ref cascades pod deletion)
+    end
+```
+
+### Daemon Crash and Re-adoption
+
+The daemon starts sandboxes in detached mode (`SpawnMode::Detached`, equivalent to `msb start`). This means:
+
+- No parent watchdog pipe; the sandbox is not coupled to the daemon's lifetime
+- The sandbox calls `setsid()` and becomes a new session leader
+- A daemon crash leaves all sandboxes running as independent OS processes
+
+On restart, the daemon re-adopts live sandboxes from the SQLite DB:
+
+```mermaid
+sequenceDiagram
+    participant DB as SQLite (node-local)
+    participant Daemon as msb-daemon
+    participant API as k8s API Server
+
+    Note over Daemon: daemon crashes
+    Note over Daemon: msb processes keep running (detached, independent)
+
+    Note over Daemon: daemon restarts
+
+    Daemon->>DB: query sandboxes with status=Running
+    DB-->>Daemon: [(pid=1234, sandbox_id=abc), ...]
+
+    loop for each entry
+        Daemon->>Daemon: kill(pid, 0)
+        alt process alive
+            Daemon->>Daemon: re-adopt — begin kill(pid,0) poll loop, reconnect to agent.sock
+            Note over Daemon: race window: process may exit between check and poll start
+        else process gone
+            Daemon->>DB: mark Crashed
+            Daemon->>API: annotate Pod: termination-reason=Failed
+            Note over Daemon: cannot distinguish "crashed while daemon was down" from "crashed normally"
+        end
+    end
+```
+
+**Re-adoption mechanism.** The agent socket path is deterministic from the sandbox name (`sha256(name)[0:32].sock`), so the daemon can reconnect without any handshake. Liveness is tracked via `kill(pid, 0)` polling rather than `waitpid`; the SDK's `ProcessHandle` today wraps `tokio::process::Child` which requires spawn-time ownership. A `ProcessHandle::from_pid()` constructor that re-attaches proper `waitpid`-based exit detection is the missing piece; until that exists, the daemon polls.
+
+**TOCTOU gap.** `kill(pid, 0)` and the first poll tick are not atomic. A sandbox that exits in that window appears live to the re-adoption sweep but dead on the first poll; the controller sees a brief period where it believes the sandbox is Running when it is not. With `pidfd_open`-based `ProcessHandle::from_pid()` this race disappears: the fd is acquired atomically at re-adoption time and delivers an event-driven exit notification.
+
+**Termination reason on missed crash.** If a sandbox dies while the daemon is down, the daemon has no record of the exit code or cause. It marks the pod `Failed`, the same value used for any unclean msb exit. There is no way to distinguish "crashed while daemon was down" from "crashed normally and daemon wrote the annotation before it died." The `terminationReason` in these cases reflects the observed state, not the inferred cause.
+
+**Graceful daemon restart.** On `SIGTERM`, the daemon does not need to do anything special; sandboxes keep running. It can drain in-flight annotation writes and exit cleanly. No watchdog disarm needed because detached mode never created a watchdog pipe.
+
+### Component Map
+
+| Component | Kind | Role |
+|-----------|------|------|
+| `msb-controller` | `Deployment` (leader election) | Watches `Sandbox` CRDs cluster-wide; creates/deletes sandbox pods; syncs CRD status |
+| `msb-daemon` | `DaemonSet` | Per-node; watches sandbox pods; tracks PID via SQLite; re-adopts live sandboxes on restart; annotates pods with termination reason |
+| `msb-prerunner` | Init container (per pod) | Resolves `secretKeyRef` values; writes resolved `msb` config to shared `emptyDir`; copies `msb` binary and `libkrunfw.so` |
+| `msb-runtime` | Container (per pod) | Runs `msb` in detached mode (started by the daemon); hosts the guest VM and smoltcp proxy |
+| `msb-bridge` | Sidecar container (per pod) | WebSocket → `agent.sock` bridge; port configurable, default 7000; injected automatically by the controller; SDK clients connect here |
+| Device plugin | Part of `msb-daemon` | gRPC server on kubelet socket; advertises `devices.microsandbox.io/kvm` |
+
+### Component Design
+
+#### msb-controller
+
+Deployment with leader election enabled. Replica count is operator-configured (typically 2 for HA), with only one replica actively reconciling at a time via a Kubernetes `Lease`. Uses `kube-rs` (`kube::runtime::Controller`).
+
+**Responsibilities:**
+- Watch `Sandbox` CRDs via a `kube::runtime::Controller` reconciler
+- On create: validate spec, create the sandbox Pod with `devices.microsandbox.io/kvm: 1` resource request; set the Sandbox CRD as an `ownerReference` on the Pod (pod is garbage collected automatically when the CRD is deleted)
+- On Pod Running: patch `Sandbox.status.phase = Running`
+- On Pod completion: read termination reason from Pod annotation, patch `Sandbox.status`. Then explicitly delete the pod (not via GC: the controller deletes it so stale pods don't accumulate). The controller must read the annotation **before** deleting the pod. If `runPolicy: RerunOnFailure` and the exit was unclean, requeue to create a new pod (cold boot). On terminal state (clean exit): if `ephemeral: true`, delete the CRD object (which cascades pod GC via owner reference).
+- On delete: owner reference cascades pod deletion automatically; daemon detects pod deletion and kills the `msb` child
+- On update: spec changes after the sandbox is Running are rejected by CEL `x-kubernetes-validations` rules in the CRD (`self == oldSelf` on `spec`); status updates are allowed
+
+**The controller is stateless.** All state is in the Kubernetes API. Everything it needs arrives via daemon-written pod annotations. A crash and restart is a no-op.
+
+**Reconcile loop:**
+
+```mermaid
+flowchart TD
+    A([reconcile triggered]) --> B{sandbox.status.phase?}
+
+    B -->|None / Pending| C{pod exists?}
+    C -->|No| D[create sandbox pod<br/>with /dev/kvm resource request]
+    D --> E[patch status.phase = Pending]
+    E --> K([done])
+    C -->|Yes| R[requeue 5s]
+
+    B -->|Running| F{pod.status?}
+    F -->|Still running| R
+    F -->|Succeeded or Failed| G[read terminationReason<br/>from pod annotation]
+    G --> G2[patch Sandbox.status<br/>+ terminationReason + exitCode]
+    G2 --> G3[delete pod explicitly]
+    G3 --> G4{pod fully gone?}
+    G4 -->|No| R
+    G4 -->|Yes| I{clean exit?}
+
+    I -->|Yes — Completed / MaxDurationExceeded /<br/>IdleTimeout / ShutdownRequested| L{ephemeral?}
+    I -->|No — Failed / OOMKilled /<br/>Evicted / NodeLost| P{runPolicy?}
+
+    P -->|Once| L
+    P -->|RerunOnFailure| RETRY[patch status.phase = Pending<br/>requeue with backoff]
+    RETRY --> D
+
+    L -->|Yes| J[delete Sandbox CRD<br/>pod already gone — ownerRef cascade is safety net only]
+    L -->|No| K
+
+    B -->|Succeeded / Failed terminal| L
+    B -->|Failed + RerunOnFailure| RETRY
+```
+
+#### msb-daemon
+
+DaemonSet on every node.
+
+**Responsibilities:**
+- Watch Pods on its own node that carry label `microsandbox.io/sandbox: "true"`
+- When a sandbox Pod becomes Running: deserialize `/msb-config/sandbox.json` into typed Rust structs and call `Sandbox::create_detached()` via the **msb Rust SDK**. The SDK passes config over fd 96 (`CONFIG_FD`); secrets stay off argv. Detached mode: no watchdog pipe, sandbox calls `setsid()`, survives daemon restarts as an independent OS process. Gap: `ProcessHandle::from_pid()` does not exist in the SDK today, so re-adoption uses `kill(pid, 0)` polling as an interim (see pidfd_open TODO below).
+- On graceful shutdown: send SIGTERM to each live msb child process. Detached mode creates no watchdog pipe, so there is nothing to disarm; SIGTERM is the shutdown signal.
+- Track the child PID in SQLite; on exit, read termination reason, annotate the Pod
+- On startup: query SQLite for sandboxes marked `Running`; probe each PID with `kill(pid, 0)`; re-adopt live ones by reconnecting to their agent socket; mark dead ones Crashed and annotate their pods
+- Run the device plugin gRPC server on `/var/lib/kubelet/device-plugins/microsandbox-kvm.sock`
+- Communicate with the controller **exclusively via CRD status and Pod annotations**; no direct RPC
+
+Liveness check:
+
+```rust
+fn process_exists(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+```
+
+#### msb-prerunner (init container)
+
+Runs once per pod before `msb-runtime` starts. Three responsibilities:
+
+1. **Secret resolution**: reads the `Sandbox` spec (passed as a base64-encoded env var by the controller), resolves each `secretKeyRef` by calling the Kubernetes API, writes a fully-resolved `msb` JSON config to `/msb-config/sandbox.json` on the shared `emptyDir`
+
+2. **Binary sideload**: copies the `msb` binary from the prerunner image into `/msb-bin/msb` on a second `emptyDir` so the runtime container does not need `msb` pre-installed
+
+3. **libkrunfw injection**: copies `libkrunfw.so` from the prerunner image into a third `emptyDir` (`/msb-lib/`). `msb-runtime` gets `MSB_LIBKRUNFW_PATH=/msb-lib/libkrunfw.so` as an env var injected by the controller. This ensures `msb` finds the library regardless of what base image the user specifies. `MSB_LIBKRUNFW_PATH` is the tier-1 resolution path; checked before any filesystem search, hard error if set but missing.
+
+```mermaid
+flowchart LR
+    A["base64_decode(MSB_SANDBOX_SPEC)"] --> B["resolve secretKeyRef values\nvia k8s API"]
+    B --> C["write /msb-config/sandbox.json\nto emptyDir (mode 0600)"]
+    C --> D["copy msb binary → /msb-bin/msb"]
+    D --> E["copy libkrunfw.so → /msb-lib/"]
+    E --> F["exit(0)"]
+```
+
+#### Device Plugin
+
+gRPC server implementing the Kubernetes Device Plugin API (`v1beta1`, GA since k8s 1.26). Reference implementation: [Virtink's device plugin](https://github.com/smartxworks/virtink/blob/main/pkg/daemon/deviceplugin/deviceplugin.go).
+
+Three non-obvious decisions:
+
+**Fixed pool of 1000 device IDs.** The Device Plugin API accepts a list of named devices, not an integer count. A pool of 1000 IDs (`kvm-0` … `kvm-999`), all pointing to `/dev/kvm`, is the standard pattern ([Virtink](https://github.com/smartxworks/virtink/blob/main/pkg/daemon/deviceplugin/deviceplugin.go), [NVIDIA](https://github.com/NVIDIA/k8s-device-plugin)). The pool size is a scheduling ceiling; CPU and memory `requests` are the real gate. Configurable via Helm; 1000 is the default.
+
+**Server before Register.** The plugin starts its gRPC server on its own socket first, then calls `Register` with kubelet. kubelet immediately dials back on `ListAndWatch`; if the server isn't up yet, that dial fails and the plugin appears dead.
+
+**inotify on the plugin socket for kubelet restarts.** When kubelet restarts it deletes all plugin sockets. The plugin watches its own socket path; on removal it tears down, sleeps 5 seconds, and re-registers from scratch. Without this the plugin is permanently orphaned after any kubelet restart.
+
+**Rust bindings.** No maintained crate exists. Vendor `v1beta1` from `github.com/kubernetes/kubelet/pkg/apis/deviceplugin/v1beta1/api.proto` and generate with `tonic-build`. `v1beta1` is the only version required by any production kubelet.
+
+**Health → stream bridge.** `tokio::sync::watch`: the inotify watcher publishes health state; every open `ListAndWatch` stream clones the receiver and wakes on change.
+
+**`Allocate` response.** Returns `DeviceSpec { host_path: "/dev/kvm", permissions: "rw" }`. No env vars or mounts.
+
+```mermaid
+sequenceDiagram
+    participant Kubelet as kubelet
+    participant Plugin as device plugin (in msb-daemon)
+
+    Plugin->>Plugin: start gRPC server on microsandbox-kvm.sock
+    Plugin->>Kubelet: Register(resourceName="devices.microsandbox.io/kvm")
+    Kubelet->>Plugin: ListAndWatch()
+    Plugin-->>Kubelet: [kvm-0…kvm-999: Healthy]
+    Note over Kubelet: capacity: devices.microsandbox.io/kvm = 1000
+
+    loop inotify on /dev/
+        alt /dev/kvm removed
+            Plugin-->>Kubelet: all IDs → Unhealthy
+        else /dev/kvm re-appears
+            Plugin-->>Kubelet: all IDs → Healthy
+        end
+    end
+
+    Kubelet->>Plugin: Allocate([{deviceID: "kvm-0"}])
+    Plugin-->>Kubelet: [{hostPath: "/dev/kvm", permissions: "rw"}]
+```
+
+### CRD Specification
+
+```yaml
+apiVersion: sandbox.microsandbox.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: my-sandbox
+  namespace: default
+spec:
+  # OCI image to use as the guest rootfs
+  image: python:3.12
+
+  # VM resources
+  cpus: 1
+  memory: 512   # integer MiB
+
+  # Command to run inside the guest (optional; defaults to image entrypoint)
+  cmd: ["python", "script.py"]
+
+  # Once (default) or RerunOnFailure
+  runPolicy: Once
+
+  # Whether to delete the CRD after the sandbox exits
+  ephemeral: true
+
+  # Secrets injected as env vars inside the guest
+  # Values come from Kubernetes Secrets — never stored in the CRD
+  secrets:
+    - env: API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: my-k8s-secret
+          key: api-key
+      # Egress: only allow this env var's value to reach these hosts
+      allowedHosts: ["api.openai.com"]
+
+  # Network configuration
+  network:
+    # Whether to enable the smoltcp proxy (default: true)
+    enabled: true
+
+    # Egress/ingress policy.
+    # preset selects a named msb NetworkPolicy preset (default: publicOnly)
+    # publicOnly — allows DNS + Public egress, denies everything else
+    # allowAll   — no restrictions
+    # denyAll    — deny all egress and ingress
+    policy:
+      preset: publicOnly
+
+    # TLS interception — msb MITM-proxies TLS, substitutes secrets, enforces policy
+    # intercept defaults to false; enable when using secret substitution over HTTPS
+    tls:
+      intercept: true
+      interceptedPorts:
+        - port: 443
+
+    # DNS overrides (optional — defaults use host /etc/resolv.conf → kube-dns in a pod)
+    dns:
+      rebindProtection: true       # block DNS rebinding attacks (default: true)
+      nameservers: []              # override resolvers; empty = use host resolv.conf
+      queryTimeoutMs: 5000
+
+    # Published ports: expose guest port on the pod IP
+    publishedPorts:
+      - containerPort: 8080
+        protocol: TCP              # TCP | UDP (default: TCP)
+
+    # Maximum concurrent connections from guest (default: 256)
+    maxConnections: 256
+
+    # Ship host trusted CAs into guest (for corporate MITM proxies: Zscaler, Cloudflare Warp)
+    trustHostCas: false
+
+  # Storage — writable upper layer size (resource.Quantity)
+  upper:
+    size: 4Gi
+
+  # Storage — named volumes (node-local, persist across sandbox runs)
+  volumes:
+    - name: workspace
+      mountPath: /workspace
+      size: 10Gi       # sparse ext4, managed by msb-daemon on the node
+
+status:
+  phase: Running             # Pending | Running | Succeeded | Failed — written by controller
+  podName: sandbox-my-sandbox-a1b2c  # written by controller at pod creation
+  nodeName: node-1           # written by controller when pod is scheduled; read back on restart for node pinning
+  startedAt: "2026-06-29T10:00:00Z"  # written by controller when phase transitions to Running
+  terminatedAt: null         # written by controller when phase transitions to Succeeded/Failed
+  # Source: daemon annotation (msb native)
+  #   clean:   Completed | MaxDurationExceeded | IdleTimeout | ShutdownRequested
+  #   unclean: Failed
+  # Source: operator-inferred from Pod/Node state (not from msb)
+  #   unclean: OOMKilled | Evicted | NodeLost
+  terminationReason: null    # written by controller from pod annotation (daemon sets the annotation)
+  exitCode: null             # written by controller from pod annotation
+```
+
+#### runPolicy
+
+msb has no native restart support. Every sandbox exits and the process terminates. `runPolicy` is entirely an operator construct: the controller is the restart loop.
+
+| Value | Behavior |
+|-------|----------|
+| `Once` (default) | Run once. Clean or unclean exit: done. No retry. |
+| `RerunOnFailure` | Run. Clean exit: done. Unclean exit: cold-boot a new pod. |
+
+**Clean vs unclean** is determined by `terminationReason`. The value comes from two sources:
+
+- **msb native** (daemon writes pod annotation): `Completed`, `MaxDurationExceeded`, `IdleTimeout`, `ShutdownRequested` (clean); `Failed` (unclean)
+- **Operator-inferred** (controller reads Pod/Node state, msb never sees these): `OOMKilled` (kubelet OOM kill), `Evicted` (pod eviction), `NodeLost` (node NotReady timeout)
+
+Clean: `Completed`, `MaxDurationExceeded`, `IdleTimeout`, `ShutdownRequested`
+Unclean: `Failed`, `OOMKilled`, `Evicted`, `NodeLost`
+
+Each retry is a full cold boot: a new pod, a new msb process, a fresh VM. The operator never restarts the same pod. Pod-level failure (eviction) and VM-process failure (non-zero exit) are treated the same. Both are unclean, both trigger a retry under `RerunOnFailure`.
+
+`RerunOnFailure` retries indefinitely. There is no `maxRetries` or retry counter. This matches KubeVirt and Virtink: neither has a built-in retry bound. If you want the sandbox stopped, delete the CRD. The controller is the restart loop; the user is the circuit breaker.
+
+Retry requeue uses an explicit `Action::requeue(duration)`. kube-rs automatic exponential backoff only applies to reconcile errors, not success-path requeues. The retry interval must be managed explicitly in the controller.
+
+**Immutability:** `spec` is sealed at creation time. `x-kubernetes-validations` CEL rules (`self == oldSelf`) enforce this in the CRD itself; the API server rejects spec updates before they reach the controller. `status` is managed exclusively by the controller and daemon.
+
+**Controller-injected containers:** The controller automatically adds `msb-bridge` as a second container in every sandbox pod and creates a `ClusterIP` Service for it. Users do not declare the bridge in the `Sandbox` spec; it is always present.
+
+**Secret handling:** Secret values are resolved by the prerunner at pod startup and never appear in CRD fields, Pod env vars, or logs.
+
+### Storage Model
+
+#### What the guest filesystem looks like
+
+The guest root filesystem is two virtio-blk devices merged by [overlayfs](https://docs.kernel.org/filesystems/overlayfs.html) at boot:
+
+```mermaid
+graph LR
+    subgraph host["Host (msb process + node filesystem)"]
+        vmdk["VMDK descriptor<br/>fsmeta EROFS + all OCI layer EROFS data<br/>read-only · shared across sandboxes<br/>cached at ~/.microsandbox/cache/"]
+        upper["upper.ext4<br/>sparse ext4 · 4 GiB default<br/>per-sandbox · writable<br/>created fresh each run by default"]
+    end
+
+    subgraph guest["Guest VM (agentd assembles at boot)"]
+        lower["lowerdir<br/>EROFS via /dev/vda"]
+        upperdir["upperdir + workdir<br/>ext4 via /dev/vdb"]
+        overlay["overlayfs → /<br/>unified guest filesystem"]
+    end
+
+    vmdk -->|"virtio-blk /dev/vda"| lower
+    upper -->|"virtio-blk /dev/vdb"| upperdir
+    lower --> overlay
+    upperdir --> overlay
+```
+
+#### Node-local files via hostPath
+
+`msb` needs access to files on the node's filesystem: the VMDK image cache, `upper.ext4`, named volume files. The pod runs on that same node. The operator uses a `hostPath` volume pointing at `~/.microsandbox/` on the node, mounted into the `msb-runtime` container at the same path:
+
+```yaml
+volumes:
+  - name: msb-state
+    hostPath:
+      path: /root/.microsandbox
+      type: DirectoryOrCreate
+containers:
+  - name: msb-runtime
+    volumeMounts:
+      - name: msb-state
+        mountPath: /root/.microsandbox
+```
+
+`hostPath` bypasses k8s storage accounting, intentional for a cache `msb` manages entirely. Downsides: scheduler is blind to disk consumption, named volumes have no PVC lifecycle, node pinning is manual via `pod.spec.nodeName`.
+
+> [!NOTE]
+> The image cache is read-only and shared across sandboxes on the same node; `hostPath` is permanently the right primitive for it. The real problems are with stateful sandboxes: a persistent upper layer or named volume is physically locked to the node where the sandbox first ran. Node loss means data loss, and there is no way to move data to another node. These are the layers that future work would target with PVC-backed storage.
+
+#### The three storage layers
+
+| Layer | What it is | Ephemeral? | Shared? | k8s aware? |
+|-------|-----------|------------|---------|-----------|
+| **Image cache** (EROFS/VMDK) | OCI layers converted to EROFS, cached on node | No, persists until evicted | Yes, all sandboxes on the same node sharing the same image | No, managed by msb-daemon |
+| **Writable upper** (`upper.ext4`) | Sparse ext4 capturing all guest writes | Yes, deleted on exit | No, one per sandbox | No, node-local file in sandbox state dir |
+| **Named volumes** | Additional sparse ext4 disks at explicit mount paths | No, survive sandbox exit | No, one per volume name | No, node-local files in `~/.microsandbox/volumes/` |
+
+#### Image cache
+
+OCI layers are pulled once, converted to EROFS, and cached at `~/.microsandbox/cache/`. Subsequent sandboxes on the same node using the same image skip pull and conversion. Cache managed entirely by `msb`.
+
+#### Writable upper layer
+
+`upper.ext4` is created fresh each run and deleted on exit (task-runner behaviour). The size is configurable via `upper.size` (default `4Gi`). There is no retain-across-runs flag in current `msb`; every run starts from a clean upper layer.
+
+#### Named volumes
+
+Named volumes are separate sparse ext4 files managed by the daemon as additional virtio-blk devices inside the guest. In V1 they are node-local:
+
+- The daemon creates and manages the volume file on the node filesystem
+- The sandbox pod is hard-pinned to the node
+- Volume lifecycle is managed by the daemon; k8s has no visibility
+- If the node is lost, the volume data is lost (accepted constraint for V1)
+
+```mermaid
+graph LR
+    crd["Sandbox CRD<br/>volumes:<br/>  - name: workspace<br/>    mountPath: /workspace<br/>    size: 10Gi"]
+    daemon["msb-daemon<br/>creates ~/.microsandbox/volumes/workspace.ext4<br/>if not exists<br/>passes path to msb (detached)"]
+    msb["msb process<br/>mounts as virtio-blk /dev/vdc<br/>inside guest at /workspace"]
+
+    crd --> daemon
+    daemon --> msb
+```
+
+#### Node pinning policy
+
+Sandboxes with named volumes or `ephemeral: false` are pinned to the node where they first ran. The controller sets `pod.spec.nodeName` (a hard assignment, not an affinity). If the node is unavailable, the pod stays `Pending` rather than rescheduling to a node with no data.
+
+| Sandbox type | Node pinning | Node loss behavior |
+|---|---|---|
+| Ephemeral (default) | None; scheduler decides freely | Pod rescheduled to any KVM-capable node |
+| `ephemeral: false` (upper layer retained), no named volumes | Hard `nodeName` pin after first run; controller reads `Sandbox.status.nodeName` on restart | Pod stays `Pending` until node returns; **without this pin the pod silently boots on a different node with a blank upper layer** |
+| Named volumes declared | Hard `nodeName` pin | Pod stays `Pending` until node returns |
+
+The pin is set at pod creation time. On subsequent starts, the controller reads `Sandbox.status.nodeName` and sets `pod.spec.nodeName` to match.
+
+> [!NOTE]
+> Hard `nodeName` is a V1 shortcut. With PVC-backed storage, node pinning would become implicit via PV `nodeAffinity` and `WaitForFirstConsumer` binding, removing the need to hard-code `nodeName`.
+
+### State Model
+
+#### State ownership
+
+The controller and daemon never share a private channel. The Kubernetes API is the only coordination point between them. Each owns a distinct slice of state:
+
+| Data | Kubernetes API | Node-local | Notes |
+|------|---------------|------------|-------|
+| Sandbox spec (image, resources, policy) | Yes, source of truth | Yes, working copy written by prerunner | Kubernetes API wins on conflict |
+| Sandbox phase / status | Yes | Yes | Daemon observes node; controller writes to Kubernetes API |
+| Running PID | No | Yes | Only meaningful on the node; controller never reads it |
+| Termination reason | Yes | Yes | Daemon observes exit, annotates Pod; controller copies to CRD status |
+| OCI image layer cache | No | Yes | Node-local; Kubernetes API is the wrong place |
+| Secret values | Never | Never | Resolved at runtime by prerunner; in memory only |
+
+#### Failure modes
+
+| Failure | What dies | What survives | Operator response |
+|---------|-----------|---------------|-------------------|
+| `msb` process crashes | Guest VM, in-flight I/O | Node-local state, image cache on disk | Daemon detects child PID exit, annotates Pod Failed; controller patches CRD; if `ephemeral`, deletes CRD; if `runPolicy: RerunOnFailure`, creates new Pod |
+| Pod OOMKilled by kubelet | Same | Same | k8s reports Pod Failed; controller handles identically |
+| `msb-daemon` crashes mid-run | Nothing; `msb` processes keep running (detached, independent) | SQLite DB, running sandboxes | Daemon restarts, queries DB for `status=Running`, probes each PID, re-adopts live ones, marks any that died while daemon was down as Failed (terminationReason=Failed, indistinguishable from a normal unclean exit) |
+| `msb-controller` crashes | Nothing; sandboxes keep running | Everything | Controller restarts, re-watches all CRDs, reconciles idempotently |
+| Node graceful drain | Guest VM (after pod eviction) | CRD in Kubernetes API, image cache on other nodes | Pod evicted; controller marks CRD Failed or creates new Pod per `runPolicy` |
+| Node hard crash | Guest VM, node-local state (lost) | CRD in Kubernetes API only | Pod stuck `Unknown`; controller marks CRD Failed after configurable timeout (default 5m) |
+| Kubernetes API unavailable | Operator cannot reconcile | Sandboxes running on nodes (orphaned) | Operator cannot reconcile; manual recovery; sandboxes run until natural exit |
+
+#### Daemon re-adoption on restart
+
+Covered in [Daemon Crash and Re-adoption](#daemon-crash-and-re-adoption).
+
+#### Sandbox lifecycle state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: Sandbox CRD created
+    Pending --> Running: Pod scheduled / msb process started
+    Running --> Succeeded: msb exits 0 (natural completion)
+    Running --> Failed: msb exits non-0 / node loss / OOMKill
+    Failed --> Pending: runPolicy=RerunOnFailure (cold boot new VM)
+    Succeeded --> [*]: ephemeral=true, CRD deleted
+    Failed --> [*]: ephemeral=true, CRD deleted
+    Succeeded --> Succeeded: ephemeral=false, CRD remains
+    Failed --> Failed: ephemeral=false, CRD remains
+```
+
+#### Run policy
+
+All sandbox pods use `RestartPolicy: Never`. Kubernetes never restarts containers itself. The controller owns all restart decisions.
+
+- **`Once`** (default): controller creates one pod; on exit (any code), patches CRD to Succeeded/Failed and stops. The pod is not recreated.
+- **`RerunOnFailure`**: controller creates a new pod on any unclean exit: `msb` exits non-zero (`Failed`), kubelet OOM-kills the pod (`OOMKilled`), pod is evicted (`Evicted`), or the node is lost (`NodeLost`). Each retry is a cold boot (fresh VM, no memory of the previous run). No restart on clean exit.
+
+`RerunOnFailure` retries indefinitely. Delete the CRD to stop a looping sandbox. `Always` and `Halted` are not exposed; they require a stopped/paused VM state that `msb` does not have.
+
+### Network Stack
+
+#### How microsandbox networking works in a pod
+
+The guest VM sees a normal network interface (`172.16.0.2`), backed by a virtio-net queue that libkrun wires into the `msb` process. On the host side of that queue sits a smoltcp TCP/IP stack running entirely in userspace. There are no TAP or TUN devices; the kernel routing table is untouched; the CNI plugin sees one pod IP and nothing else.
+
+```mermaid
+graph TB
+    subgraph pod["Sandbox Pod (CNI network namespace)"]
+        subgraph msb["msb process (in-memory address space)"]
+            guest["Guest VM<br/>(libkrun/KVM)<br/>sees: 172.16.0.2 / fd42:6d73:62::slot:2"]
+            stack["smoltcp poll loop<br/>────────────────<br/>virtual gateway: 172.16.0.1<br/>frame classify<br/>DNS intercept<br/>TCP proxy tasks<br/>TLS intercept<br/>secret substitute<br/>egress policy"]
+            guest <-->|"virtio-net / libkrun queue"| stack
+        end
+        stack -->|"real TcpStream from pod IP"| cni["Pod IP: 10.244.x.x<br/>(CNI-allocated, kernel-visible)"]
+    end
+    cni -->|"masqueraded at node by CNI plugin"| net["Real Network<br/>api.openai.com etc."]
+```
+
+Outbound connections from the guest pass through the smoltcp poll loop, which classifies each SYN, applies egress policy, intercepts TLS and DNS where configured, and opens a real `TcpStream` from the pod IP to the destination. Inbound traffic has no path to `172.16.0.2` from outside the pod. The only way in is a declared `publishedPort`: `msb` binds a listener on the pod IP and proxies into the guest in userspace. The operator creates a `ClusterIP` Service per sandbox and sets `hostBind` to `0.0.0.0`.
+
+In a pod (one sandbox per pod), the slot is always 0. The operator does no IPAM and needs no coordination with the CNI.
+
+`NetworkPolicy` applies at the pod level, below msb's proxy. If pod-level egress is restricted, it must allow the same destinations as the msb-level policy, otherwise msb allows a connection that the kernel drops silently.
+
+#### Network knobs
+
+The `spec.network` fields the CRD exposes (all map directly to msb `NetworkConfig`):
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `enabled` | bool | true | Disable smoltcp proxy entirely |
+| `policy.preset` | string | `publicOnly` | Named egress/ingress policy preset |
+| `tls.intercept` | bool | false | MITM-proxy TLS to enforce policy and substitute secrets |
+| `tls.interceptedPorts[].port` | integer | (none) | Which ports get TLS interception (typically 443) |
+| `dns.rebindProtection` | bool | true | Block DNS rebinding attacks |
+| `dns.nameservers` | string[] | [] | Override DNS resolvers; empty = host `resolv.conf` |
+| `dns.queryTimeoutMs` | integer | 5000 | DNS query timeout in milliseconds |
+| `publishedPorts[].containerPort` | integer | (none) | Guest port to expose on the pod IP |
+| `publishedPorts[].protocol` | string | `TCP` | `TCP` or `UDP` |
+| `maxConnections` | integer | 256 | Max concurrent guest TCP connections |
+| `trustHostCas` | bool | false | Copy host trusted CAs into guest for corporate MITM proxies |
+
+`publishedPorts[].hostBind` is set by the operator to `0.0.0.0` automatically and is not user-configurable.
+
+**Interface overrides (`interface.mac`, `interface.mtu`, `interface.ipv4Address`, `interface.ipv4Pool`) are not exposed.** All are derived from the sandbox slot; manual overrides risk IP conflicts between sandboxes on the same node with no valid use case in a cluster context.
+
+**NetworkPolicy model.** The policy is a structured rule list. Each rule has:
+- `direction`: `Egress`, `Ingress`, or `Any`
+- `destination`: `Any`, `Cidr(prefix)`, `Domain(name)`, `DomainSuffix(name)`, or `Group(g)`
+- `ports`: optional port ranges
+- `action`: `Allow` or `Deny`
+
+Built-in destination groups: `Public`, `Private`, `Loopback`, `LinkLocal`, `Metadata`, `Multicast`, `Host`.
+
+Built-in presets:
+
+| Preset | Behaviour |
+|--------|-----------|
+| `publicOnly` (default) | Allow DNS + Public egress; deny everything else |
+| `allowAll` | No restrictions |
+| `denyAll` | Deny all egress and ingress |
+| `nonLocal` | Allow non-RFC-1918 egress; deny Private/Loopback |
+
+**SNI + DNS double-check.** For allow rules matching a domain, msb checks both the TLS SNI and the DNS cache entry; the destination IP must match the DNS A/AAAA record returned for the domain. This prevents SNI spoofing. Deny rules match SNI alone.
+
+**`trustHostCas`.** Required when nodes sit behind a corporate MITM proxy (Zscaler, Cloudflare Warp, Netskope); copies the host CA bundle into the guest so outbound TLS verifies correctly.
+
+### Security Model
+
+#### Pod security context
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    supplementalGroups: [<kvm-gid>]  # node-dependent: stat -c %g /dev/kvm
+  containers:
+  - name: msb-runtime
+    env:
+    - name: MSB_HOME
+      value: /msb-home        # /root/.microsandbox is inaccessible to non-root
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+        add: ["NET_ADMIN"]
+    resources:
+      limits:
+        devices.microsandbox.io/kvm: 1
+```
+
+**`CAP_NET_ADMIN`** is required by libkrun internally for its virtio-net setup. Microsandbox's own network stack (smoltcp) is pure userspace: no TAP devices, no iptables. `NET_ADMIN` comes entirely from libkrun, not smoltcp. `SYS_ADMIN` is not required; the device plugin grant of `/dev/kvm` is sufficient for KVM ioctls. No `--privileged` flag. This is tighter than KubeVirt's virt-launcher (`NET_ADMIN + NET_RAW + SYS_NICE`); microsandbox needs `NET_ADMIN` only.
+
+`NET_ADMIN` is in the `baseline` Pod Security Standard allowlist. Sandbox namespaces need `enforce: baseline`; no per-capability exemption required. Clusters enforcing `restricted` cluster-wide need a namespace-level override.
+
+**Non-root requirements.** The pod needs two things beyond the capability grant to run non-root:
+
+- `supplementalGroups: [<kvm-gid>]`: `/dev/kvm` is `crw-rw---- root:kvm`. The device plugin handles the kernel cgroup allowlist but not Unix DAC; the process must be in the kvm group to open the device. The kvm GID is node-dependent and not standardised; Ubuntu 24.04 assigns it dynamically. The operator or Helm chart must accept it as a configuration value, read it from a node label, or require a udev rule on the node that pins it to a known value (KubeVirt's approach).
+- `MSB_HOME` pointing to a writable path; the default (`/root/.microsandbox`) is inaccessible to a non-root uid. libkrun has no uid==0 check.
+
+
+#### How secrets work
+
+Secrets in microsandbox are per-sandbox, declared as `SecretEntry` structs inside `NetworkConfig` → `SecretsConfig`. Each entry carries:
+
+- `env_var`: the environment variable name the guest sees, set to the `placeholder` value
+- `value`: the actual secret string (never enters the guest)
+- `placeholder`: what the guest sees instead (e.g. `$MSB_API_KEY`)
+- `allowed_hosts`: which hosts the proxy is permitted to substitute this value to
+- `require_tls_identity`: only substitute after TLS SNI verification (default: true)
+
+The `NetworkConfig` (including all `SecretEntry.value` fields) is part of `LaunchConfig`. The SDK serializes `LaunchConfig` as JSON and passes it to `msb start` over **fd 96** (`CONFIG_FD`), kept off argv and `/proc/<pid>/cmdline` to prevent leakage via `ps`. The proxy intercepts outbound HTTP/HTTPS, finds the placeholder in headers/body/auth, and substitutes the real value. All substitution happens inside the `msb` process, invisible to the guest.
+
+#### Secret handling chain in Kubernetes
+
+The prerunner needs to build a fully-resolved `LaunchConfig` with real `SecretEntry.value` fields populated before `msb start` runs. Secret values cannot be mounted as files because they go into a specific field inside a structured JSON blob that also contains network config, rootfs paths, slot number, and lifecycle config.
+
+The prerunner runs inside the pod, in the sandbox's namespace, with a namespace-scoped ServiceAccount that can only read secrets in that namespace:
+
+```mermaid
+flowchart TD
+    A["Kubernetes Secret<br/>(namespace-scoped)"]
+    B["msb-prerunner (init container)<br/>reads secretKeyRef values via k8s API<br/>builds fully-resolved LaunchConfig JSON<br/>writes to emptyDir mode 0600"]
+    C["/msb-config/sandbox.json<br/>emptyDir — not in image layer, not in env vars, not in logs"]
+    D["msb-runtime<br/>reads /msb-config/sandbox.json from emptyDir<br/>passes to msb start via fd 96 (CONFIG_FD)<br/>SecretEntry.value in memory only<br/>guest sees only placeholder string"]
+    E["smoltcp proxy<br/>intercepts outbound HTTP/HTTPS<br/>substitutes placeholder → real value<br/>only to allowed_hosts · never logs · blocks violations"]
+
+    A -->|"RBAC: prerunner SA can read Secrets in namespace"| B
+    B --> C
+    C -->|"read from emptyDir, passed via fd 96 not argv"| D
+    D --> E
+```
+
+Secret values never appear in: CRD spec/status, Pod env vars, container argv, image layers, or log output.
+
+#### RBAC
+
+Three ServiceAccounts, each scoped to the minimum needed:
+
+**`msb-controller`** has a ClusterRole covering Sandbox CRDs, pods, services, events, and leases. It also needs `rbac.authorization.k8s.io/roles` and `rolebindings` create/delete to provision the per-namespace prerunner Role on first Sandbox creation in a namespace. It has no secrets access.
+
+**`msb-daemon`** has a ClusterRole with `pods: patch` (to write termination annotations) and `nodes: get`. The node read is cluster-wide because RBAC cannot scope to a single node via fieldSelector; this is a known over-permission. The pod patch is similarly cluster-wide, which means a compromised daemon on one node could annotate pods it does not own. Both are V1 limitations acknowledged here; the Helm chart should document them.
+
+**`msb-prerunner`** has a namespace-scoped Role with `secrets: get`. The Role covers all secrets in the namespace; RBAC has no mechanism to restrict to only the secrets a specific Sandbox references. The prerunner is the only component with any secrets access.
+
+`Sandbox` is namespace-scoped, so standard Kubernetes isolation applies: RBAC, `ResourceQuota`, and `NetworkPolicy` all work identically to pods. Two aggregated ClusterRoles (`sandbox-operator`, `sandbox-viewer`) are shipped with the Helm chart for tenants to bind into their own namespaces via RoleBinding. Quotas use `count/sandboxes.sandbox.microsandbox.io`; all create/delete operations appear in the audit log with caller identity.
+
+**ResourceQuota example:**
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sandbox-quota
+  namespace: team-a
+spec:
+  hard:
+    count/sandboxes.sandbox.microsandbox.io: "10"
+    requests.cpu: "20"
+    requests.memory: "40Gi"
+```
+
+### Sandbox Access and SDK Integration
+
+#### How the SDK reaches a running sandbox
+
+SDK-to-sandbox control plane: Unix domain socket over virtio-serial.
+
+```mermaid
+flowchart TD
+    SDK["SDK / msb exec"]
+    relay["relay process\n(up to 128 concurrent clients,\nnon-overlapping frame ID ranges)"]
+    agentd["agentd (PID 1 inside guest)"]
+
+    SDK -->|"agent.sock\n~/.microsandbox/run/agent/{sha256(name)[:32]}.sock"| relay
+    relay -->|"virtio-serial\n(independent of smoltcp)"| agentd
+```
+
+The relay accepts up to 128 concurrent SDK clients, each assigned a non-overlapping frame ID range. `--no-net` has no effect on this path. A fully network-isolated sandbox is still fully usable for exec and file operations.
+
+#### Protocol wire format
+
+The agent protocol wire format is:
+
+`[len: u32 BE][id: u32 BE][flags: u8][CBOR(version, type, payload)]`
+
+The `id` (correlation ID) and `flags` fields sit **outside** the [CBOR](https://www.rfc-editor.org/rfc/rfc8949) payload. The full frame prefix is 9 bytes: `len` (4) + `id` (4) + `flags` (1). Relay intermediaries read those 9 bytes, make routing decisions, and forward frames without deserializing the CBOR payload.
+
+`AgentClient` exposes raw protocol access via `stream_raw` and `send_raw`; these send raw CBOR frames without SDK parsing. `AgentClient::connect_stream` accepts any `AsyncRead + AsyncWrite`, so wrapping a WebSocket connection into that interface is the only glue code needed.
+
+#### Access options from outside the pod
+
+| Path | Transport | External access | Full SDK API |
+|---|---|---|---|
+| `agent.sock` direct | UDS (local only) | no | yes, full SDK surface |
+| WebSocket bridge (V1) | TCP/WebSocket | yes | yes, via `AgentClient::connect_stream` |
+| `msb ssh serve` | TCP/SSH | yes | no, interactive shell only |
+
+`msb ssh serve` binds a real TCP listener (default port 2222). Exposed via a Kubernetes Service it gives interactive shell access from outside the pod without any gateway.
+
+#### V1: WebSocket bridge sidecar
+
+`agent.sock` is a Unix domain socket, reachable within the pod but not from outside. The bridge makes it network-accessible: it runs as a sidecar in the sandbox pod, accepts WebSocket connections on TCP port 7000, and forwards frames verbatim to `agent.sock`. No CBOR parsing; it moves bytes. The controller creates a `ClusterIP` Service per sandbox so SDK clients elsewhere in the cluster can reach it.
+
+```mermaid
+flowchart TD
+    client["external SDK client"]
+    svc["Kubernetes ClusterIP Service"]
+    bridge["msb-bridge sidecar\n(in sandbox pod, default port 7000)"]
+    sock["agent.sock\n(sandbox name → sha256[:32].sock)"]
+    agentd["agentd inside guest"]
+
+    client -->|"WebSocket\nws://sandbox-name.namespace.svc.cluster.local:7000"| svc
+    svc --> bridge
+    bridge -->|"raw frame forwarding\n9-byte framed frames verbatim"| sock
+    sock -->|"virtio-serial"| agentd
+```
+
+On each incoming WebSocket connection the bridge dials `agent.sock`, reads the 8-byte handshake prologue (`id_min u32 BE + id_max u32 BE`) and the `core.ready` frame, sends them together as the first WebSocket message, then enters bidirectional byte forwarding. If the dial fails (sandbox restarting), it retries with backoff; the socket path is deterministic from the sandbox name so no re-discovery is needed.
+
+
+### Deployment
+
+#### Helm chart contents
+
+| Resource | Kind | Notes |
+|----------|------|-------|
+| `msb-controller` | `Deployment` | 2 replicas; leader election; cluster-wide |
+| `msb-daemon` | `DaemonSet` | Every node; includes device plugin |
+| `sandboxes.sandbox.microsandbox.io` | `CustomResourceDefinition` | v1alpha1 |
+| `msb-controller` | `ClusterRole` + `ClusterRoleBinding` | |
+| `msb-daemon` | `ClusterRole` + `ClusterRoleBinding` | |
+| `msb-prerunner` | `Role` + `RoleBinding` (per ns, created by controller on first sandbox in namespace) | Secret read access |
+| `msb-controller` | `ServiceAccount` | |
+| `msb-daemon` | `ServiceAccount` | |
+| `msb-prerunner` | `ServiceAccount` | |
+
+No ingress, no service mesh, no storage classes, no cert-manager dependency.
+
+#### Node requirements
+
+- Nodes must have `/dev/kvm` accessible (character device, mode 0660)
+- KVM is available on: bare metal, Hetzner bare metal, AWS `*.metal` instances, bare-metal GKE node pools, self-hosted clusters with nested virt enabled
+- KVM is NOT available on: standard EKS/GKE/AKS VM nodes (no nested virt by default), Fargate, most managed node groups
+- The device plugin reports `devices.microsandbox.io/kvm: 0` on non-KVM nodes; the scheduler will not place sandbox pods there
+
+#### Port publishing
+
+The operator sets `hostBind: 0.0.0.0` automatically for any `publishedPorts` entry and creates a `ClusterIP` Service. The sandbox is reachable within the cluster at `{service-name}.{namespace}.svc.cluster.local:{port}`. External access (LoadBalancer, Ingress) is the user's responsibility; out of scope for V1.
+
+---
+
+## Risks and Mitigations
+
+**1. hostPath and node affinity**
+
+`hostPath` volumes tie sandbox state to a node. Node loss means data loss for stateful sandboxes. The scheduler can still place a `nodeName`-pinned pod on a gone node and leave it `Pending` indefinitely.
+
+_Mitigation:_ Hard `nodeName` pin prevents silent rescheduling to a different node with no data. Node loss timeout in the controller marks the CRD Failed after a configurable period. Document the trade-off: stateful sandboxes require node availability.
+
+**2. No KVM emulation fallback**
+
+libkrun has no TCG/software emulation mode. If `/dev/kvm` is absent, `msb` fails immediately with no graceful degradation.
+
+_Mitigation:_ Enforce via device plugin resource request; pods cannot be scheduled to nodes without KVM. Document this as a hard cluster requirement at installation time.
+
+**3. `NET_ADMIN` and Pod Security Standards**
+
+`NET_ADMIN` is permitted by the `baseline` PSS profile but blocked by `restricted`. Clusters enforcing cluster-wide `restricted` cannot run sandbox pods without a namespace-level override.
+
+_Mitigation:_ Operator creates sandbox namespaces with `enforce: baseline`. No per-capability exemption needed; `SYS_ADMIN` is not required. Clusters enforcing `restricted` cluster-wide need a namespace-level `enforce: baseline` override for sandbox namespaces.
+
+**4. Secret leakage surface**
+
+Secrets transit through: k8s API (prerunner reads them), emptyDir (sandbox.json), fd 96 (passed to msb), and msb process memory. Each is a potential leak surface.
+
+_Mitigation:_ emptyDir written mode 0600 by prerunner. fd 96 is not visible in `/proc/<pid>/cmdline`. msb keeps values in memory only. The guest never sees real values. The proxy never logs substituted values. No secret appears in CRD spec, Pod env vars, or container argv.
+
+---
+
+## Alternatives
+
+### exec-based vs socket API for msb management
+
+**Decision: exec-based (current).**
+
+The daemon uses the msb Rust SDK to spawn `msb` in detached mode, tracks the PID via SQLite, and reads SQLite for status. No changes to `msb` internals required.
+
+**Rejected: Unix socket management API.** Adding a socket API to `msb` (analogous to [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor)'s socket that Virtink uses) would allow the daemon to call `VmInfo()`-equivalent RPCs instead of scraping SQLite. More robust and richer lifecycle events, but requires invasive changes to `msb`. Deferred until exec-based limitations become concrete.
+
+### Sidecar vs daemon-level bridge
+
+**Decision: sidecar.**
+
+The WebSocket bridge runs as a second container in the sandbox pod. One bridge per sandbox; a crash affects only that sandbox. No routing logic needed; the sidecar always talks to exactly one `agent.sock`.
+
+**Rejected: daemon-level bridge.** Fewer processes, but the daemon must route incoming connections to the right `agent.sock`, and a crash affects every sandbox on the node simultaneously.
+
+### Node-local storage vs PVC-backed storage
+
+**Decision: raw node-local for V1.**
+
+All three storage layers are node-local sparse files managed by `msb` on the host filesystem; no StorageClass, no PVC required. The image cache (EROFS) and ephemeral upper layer have no storage problem: the former is read-only and inherently node-local, the latter is thrown away on exit. The two stateful layers (persistent upper and named volumes) have a node-pinning and data loss problem. The V2 direction, PVC-backed storage with CDI as the data movement layer, is discussed in [Open Questions #2](#open-questions).
+
+### Webhook admission vs CEL rules
+
+**Decision: no webhook for V1.**
+
+Field validation beyond what OpenAPI schema expresses is handled by [`x-kubernetes-validations` CEL rules](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules) in the CRD itself. Spec defaulting is handled by `default:` fields in the CRD OpenAPI schema. Cross-resource checks (e.g. "does this Secret exist?") are handled by the prerunner at runtime; if the secret is missing, the pod fails to start, same behaviour as a pod with a bad `secretKeyRef`. Image policy is better delegated to an existing policy engine (OPA/Gatekeeper, Kyverno).
+
+**Rejected: validating/mutating admission webhook.** The operational cost (TLS cert management, availability requirement: a broken webhook blocks all Sandbox creates cluster-wide) is not justified when CRD schema validation and external policy engines cover the same ground. Add a webhook only when a concrete gap is found post-MVP.
+
+---
+
+## Open Questions
+
+**1. Stateful storage: node pinning and PVC-backed volumes**
+
+`upper.ext4` and named volumes are raw files on the host, invisible to the scheduler. `ephemeral: false` looks like a "keep my changes" flag, but a restart on a different node boots with a blank upper layer and no error. V1 mitigates this with a hard `nodeName` patch, which prevents silent data loss but permanently ties the sandbox to a node the user never chose.
+
+The V2 direction is PVC-backed storage. PVCs with `WaitForFirstConsumer` let the scheduler pick the node first; the provisioner creates the volume there. PVCs would be deterministically named (`upper-{sandbox}`, `vol-{sandbox}-{name}`), created before the pod, and reattached on restart. `msb` sees them as block devices, identical to current sparse files from its perspective. `ReadWriteOncePod` (RWOP, GA in 1.29) is the right access mode; `ReadWriteOnce` allows multiple pods on the same node to mount the same PVC simultaneously.
+
+Data movement between PVCs uses [CDI](https://github.com/kubevirt/containerized-data-importer). CDI selects the best available clone strategy: CSI native clone (no network I/O, requires same StorageClass), VolumeSnapshot clone (requires a VolumeSnapshotClass), or host-assisted clone (bytes stream over the network, works across any two StorageClasses). CDI never sets node affinity on cloned PVCs; topology is the CSI driver's concern. This requires a clean `msb` API for booting from a pre-existing block device path.
+
+**2. Termination state relay: Pod annotation vs daemon status patch**
+
+The daemon writes `terminationReason` to a Pod annotation; the controller reads it and copies it into `Sandbox.status`. This keeps the controller as the sole writer of CRD status, but creates a race for `ephemeral: true` sandboxes: ownerRef cascade GCs the pod immediately on CRD deletion, and the controller may not read the annotation in time. The alternative is for the daemon to patch `Sandbox.status.terminationReason` directly, which eliminates the race but introduces two writers on the status subresource. A partitioned status object (`status.node` owned by daemon, `status.phase` owned by controller) is the natural resolution but the right shape is unresolved.
+
+**3. Secret delivery at rest: emptyDir vs in-memory pipe**
+
+The prerunner writes a fully-resolved `LaunchConfig` JSON (including plaintext secret values) to an emptyDir at `mode 0600`. The file persists for the entire pod lifetime; anything with `kubectl exec` access or node filesystem access can read it. The alternative is an in-memory transfer: prerunner holds the resolved config in memory and passes it to `msb-runtime` over a shared pipe or `memfd`, never touching a filesystem path. The tradeoff is implementation complexity (cross-container communication before the main container starts is awkward with init containers) against a meaningful reduction in at-rest exposure. Whether `mode 0600 emptyDir` is acceptable depends on the threat model: it is sufficient if the boundary is cluster-admin access, insufficient if namespace tenants can `kubectl exec`.
+
+**4. msb-bridge: universal sidecar vs opt-in**
+
+The controller injects `msb-bridge` into every sandbox pod unconditionally. For ephemeral task-runner sandboxes (`runPolicy: Once`, no `publishedPorts`), the bridge is unreachable before the sandbox exits; it adds a container, an image pull, and a Service with no benefit. The counterargument is operational simplicity: no conditional controller logic, no user-facing knob to set wrong, and the SDK always works against any sandbox. The unresolved question is whether a `spec.access.bridge: false` field is worth the controller complexity, or whether making the bridge image small enough renders the cost negligible.
+
+**5. Management socket and lifecycle operations**
+
+The daemon currently manages `msb` by spawning a subprocess and scraping SQLite. A management socket on `msb`, analogous to Cloud Hypervisor's `/run/cloud-hypervisor.sock` used by Virtink, would replace polling with typed RPCs and unlock operations that are not cleanly expressible today:
+
+| Operation | Current state | With management socket |
+|-----------|--------------|------------------------|
+| Graceful shutdown | SIGTERM to msb process; may not reach guest | ACPI power button signal; guest OS shuts down cleanly |
+| Pause / Resume | Not possible | Freeze VM execution in place; libkrun support untested |
+| Reboot | Not possible | VM-level reboot without pod restart |
+
+The `agentd` relay socket already exists for exec/file operations; the question is whether lifecycle operations warrant a second socket. The trigger to add it is a concrete requirement (graceful shutdown for databases, pause for snapshotting) that cannot be built cleanly on top of signal+polling.
+
+**6. Snapshot CRDs**
+
+`msb` has a complete offline snapshot system (CLI, Rust and Python SDKs, manifest with integrity verification). The primitives exist; the question is the Kubernetes API shape. The idiomatic pattern, following VolumeSnapshot and KubeVirt VirtualMachineSnapshot, is three CRDs: `SandboxSnapshot` (namespace-scoped, user-created), `SandboxSnapshotContent` (controller-managed, holds the artifact reference), and `SandboxSnapshotClass` (cluster-scoped, admin-facing). Boot-from-snapshot on `SandboxSpec` uses a typed `bootSource.snapshotRef` rather than an untyped string. The snapshot content backend maps naturally onto a PVC once named volumes move off `hostPath`.
+
+---
+
+## References
+
+| Resource | Link |
+|----------|------|
+| Virtink project | [github.com/smartxworks/virtink](https://github.com/smartxworks/virtink) |
+| KubeVirt project | [github.com/kubevirt/kubevirt](https://github.com/kubevirt/kubevirt) |
+| Cloud Hypervisor | [github.com/cloud-hypervisor/cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) |
+| kube-rs | [github.com/kube-rs/kube](https://github.com/kube-rs/kube) |
+| Kubernetes Device Plugin API | [kubernetes.io/docs/…/device-plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/) |
+| Kubernetes Device Plugin proto | [github.com/kubernetes/kubelet/…/device_plugin.proto](https://github.com/kubernetes/kubelet/blob/master/pkg/apis/deviceplugin/v1beta1/api.proto) |
+| smoltcp (in-process TCP/IP stack) | [github.com/smoltcp-rs/smoltcp](https://github.com/smoltcp-rs/smoltcp) |
+| libkrun | [github.com/containers/libkrun](https://github.com/containers/libkrun) |
+| EROFS filesystem | [docs.kernel.org/filesystems/erofs](https://docs.kernel.org/filesystems/erofs.html) |
+| overlayfs | [docs.kernel.org/filesystems/overlayfs](https://docs.kernel.org/filesystems/overlayfs.html) |
+| CBOR (RFC 8949) | [rfc-editor.org/rfc/rfc8949](https://www.rfc-editor.org/rfc/rfc8949) |
+| Kubernetes CRD versioning | [kubernetes.io/docs/…/custom-resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/) |
+| CRD validation with CEL | [kubernetes.io/docs/…/cel](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules) |
+| Kubernetes VolumeSnapshot API | [kubernetes.io/docs/…/volume-snapshots](https://kubernetes.io/docs/concepts/storage/volume-snapshots/) |
+| KubeVirt Snapshot Restore API | [kubevirt.io/user-guide/…/snapshot_restore_api](https://kubevirt.io/user-guide/storage/snapshot_restore_api/) |
+| Local Persistent Volumes (KEP-121) | [kubernetes.io/blog/…/local-persistent-volumes-ga](https://kubernetes.io/blog/2019/04/04/kubernetes-1.14-local-persistent-volumes-ga/) |
+| local-path-provisioner | [github.com/rancher/local-path-provisioner](https://github.com/rancher/local-path-provisioner) |
+| KubeVirt run strategies | [kubevirt.io/user-guide/…/run_strategies](https://kubevirt.io/user-guide/compute/run_strategies/) |
