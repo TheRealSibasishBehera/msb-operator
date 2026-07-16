@@ -1,0 +1,8 @@
+apiVersion: sandbox.microsandbox.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: test-immutable
+spec:
+  image: "busybox:latest"
+  cpus: 1
+  memory: 256

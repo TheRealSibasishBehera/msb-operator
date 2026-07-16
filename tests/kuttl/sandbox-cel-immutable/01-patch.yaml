@@ -1,0 +1,13 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      # CEL immutability: the API server must reject a spec patch (non-zero exit).
+      if kubectl patch sandbox test-immutable --type=merge \
+          -p '{"spec":{"cpus":4}}' 2>&1 | grep -q "immutable after creation"; then
+        echo "PASS: spec mutation rejected"
+        exit 0
+      else
+        echo "FAIL: spec mutation was not rejected"
+        exit 1
+      fi

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all
+
+  crd:
+    name: generate + apply CRD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate CRD YAML
+        run: cargo run -p xtask -- generate-crd
+
+      - name: Start kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: msb-ci
+
+      - name: Apply CRD
+        run: kubectl apply -f deploy/crds/sandboxes.yaml
+
+      - name: Install kuttl
+        run: |
+          curl -sSLf -o /usr/local/bin/kubectl-kuttl \
+            https://github.com/kudobuilder/kuttl/releases/download/v0.15.0/kubectl-kuttl_0.15.0_linux_x86_64
+          chmod +x /usr/local/bin/kubectl-kuttl
+
+      - name: Run kuttl tests
+        run: kubectl kuttl test --config tests/kuttl/kuttl-test.yaml
