@@ -1,0 +1,10 @@
+apiVersion: sandbox.microsandbox.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: test-basic
+spec:
+  image: "busybox:latest"
+  cpus: 1
+  memory: 256
+  ephemeral: true
+  runPolicy: Once

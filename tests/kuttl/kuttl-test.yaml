@@ -1,0 +1,8 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+testDirs:
+  - ./tests/kuttl/sandbox-basic
+  - ./tests/kuttl/sandbox-cel-immutable
+startKIND: false
+suppress: ["events"]
+timeout: 120
