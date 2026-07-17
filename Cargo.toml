@@ -46,7 +46,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # cli
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+# time
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # gRPC / protobuf (device plugin)
 tonic = "0.12"

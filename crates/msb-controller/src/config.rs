@@ -1,0 +1,131 @@
+use std::fmt;
+
+/// Longest `MSB_HOME` that keeps the hashed agent socket path inside `sun_path`.
+///
+/// The socket is `$MSB_HOME/run/agent/<32 hex>.sock`, costing a fixed 48 bytes
+/// beyond the home path, and msb requires the total to be under 108 on Linux.
+/// Past this limit msb silently falls back to a legacy socket layout, and the
+/// bridge — which dials the hashed path — cannot connect.
+pub const MSB_HOME_MAX_BYTES: usize = 59;
+
+pub const KVM_RESOURCE: &str = "devices.microsandbox.io/kvm";
+pub const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
+pub const FIELD_MANAGER: &str = "msb-controller";
+
+pub const CONFIG_MOUNT: &str = "/msb-config";
+pub const BIN_MOUNT: &str = "/msb-bin";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error(
+        "msbHome {path:?} is {len} bytes; must be <= {MSB_HOME_MAX_BYTES} or msb falls back to \
+         the legacy agent socket path and the bridge cannot connect"
+    )]
+    MsbHomeTooLong { path: String, len: usize },
+
+    #[error("msbHome {0:?} must be an absolute path")]
+    MsbHomeNotAbsolute(String),
+}
+
+/// Node-dependent settings supplied by the Helm chart.
+#[derive(Debug, Clone)]
+pub struct ControllerConfig {
+    msb_home: String,
+    /// GID of `/dev/kvm` on the node. Not standardised — Ubuntu assigns it
+    /// dynamically, so it is a deployment-time value, not a constant.
+    pub kvm_gid: i64,
+    pub prerunner_image: String,
+    pub runtime_image: String,
+    pub bridge_image: String,
+    pub bridge_port: i32,
+}
+
+impl ControllerConfig {
+    pub fn new(
+        msb_home: impl Into<String>,
+        kvm_gid: i64,
+        prerunner_image: impl Into<String>,
+        runtime_image: impl Into<String>,
+        bridge_image: impl Into<String>,
+        bridge_port: i32,
+    ) -> Result<Self, ConfigError> {
+        let msb_home = msb_home.into();
+
+        if !msb_home.starts_with('/') {
+            return Err(ConfigError::MsbHomeNotAbsolute(msb_home));
+        }
+        if msb_home.len() > MSB_HOME_MAX_BYTES {
+            return Err(ConfigError::MsbHomeTooLong {
+                len: msb_home.len(),
+                path: msb_home,
+            });
+        }
+
+        Ok(Self {
+            msb_home,
+            kvm_gid,
+            prerunner_image: prerunner_image.into(),
+            runtime_image: runtime_image.into(),
+            bridge_image: bridge_image.into(),
+            bridge_port,
+        })
+    }
+
+    /// Validated at construction, so it cannot be set past `MSB_HOME_MAX_BYTES`.
+    pub fn msb_home(&self) -> &str {
+        &self.msb_home
+    }
+}
+
+impl fmt::Display for ControllerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "msb_home={} kvm_gid={}", self.msb_home, self.kvm_gid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_home(home: &str) -> Result<ControllerConfig, ConfigError> {
+        ControllerConfig::new(
+            home,
+            104,
+            "prerunner:dev",
+            "runtime:dev",
+            "bridge:dev",
+            7000,
+        )
+    }
+
+    #[test]
+    fn accepts_a_short_absolute_home() {
+        let cfg = config_with_home("/var/lib/msb").expect("valid home");
+        assert_eq!(cfg.msb_home(), "/var/lib/msb");
+    }
+
+    #[test]
+    fn accepts_home_at_exactly_the_limit() {
+        let home = format!("/{}", "a".repeat(MSB_HOME_MAX_BYTES - 1));
+        assert_eq!(home.len(), MSB_HOME_MAX_BYTES);
+        assert!(config_with_home(&home).is_ok());
+    }
+
+    #[test]
+    fn rejects_home_one_byte_over_the_limit() {
+        let home = format!("/{}", "a".repeat(MSB_HOME_MAX_BYTES));
+        assert_eq!(home.len(), MSB_HOME_MAX_BYTES + 1);
+        assert!(matches!(
+            config_with_home(&home),
+            Err(ConfigError::MsbHomeTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_relative_home() {
+        assert!(matches!(
+            config_with_home("var/lib/msb"),
+            Err(ConfigError::MsbHomeNotAbsolute(_))
+        ));
+    }
+}
