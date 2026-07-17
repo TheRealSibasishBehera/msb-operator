@@ -20,6 +20,20 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
+tonic.workspace = true
+prost.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+async-stream.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
+notify.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+tonic-build = "0.12"
 
 [[bin]]
 name = "msb-daemon"
