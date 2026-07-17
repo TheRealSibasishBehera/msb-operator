@@ -47,3 +47,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # cli
 clap = { version = "4", features = ["derive"] }
+
+# gRPC / protobuf (device plugin)
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = { version = "0.1", features = ["sync"] }
+notify = "8"
+async-stream = "0.3"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
