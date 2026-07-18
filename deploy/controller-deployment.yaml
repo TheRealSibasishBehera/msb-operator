@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: msb-controller
+  namespace: msb-system
+  labels:
+    app.kubernetes.io/name: msb-controller
+spec:
+  # Two replicas with leader election: one active reconciler, one warm standby.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: msb-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: msb-controller
+    spec:
+      serviceAccountName: msb-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: msb-controller
+          image: ghcr.io/superradcompany/msb-controller:latest
+          args: ["--namespace", "$(MSB_NAMESPACE)"]
+          env:
+            - name: MSB_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # GID of /dev/kvm on the nodes; node-dependent, set at install time.
+            - name: MSB_KVM_GID
+              value: "104"
+            - name: MSB_PRERUNNER_IMAGE
+              value: ghcr.io/superradcompany/msb-prerunner:latest
+            - name: MSB_RUNTIME_IMAGE
+              value: ghcr.io/superradcompany/msb-runtime:latest
+            - name: MSB_BRIDGE_IMAGE
+              value: ghcr.io/superradcompany/msb-bridge:latest
+            - name: RUST_LOG
+              value: info
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi

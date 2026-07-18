@@ -1,8 +1,10 @@
 mod config;
 mod controller;
+mod leader;
 mod pod;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -39,6 +41,15 @@ struct Cli {
 
     #[arg(long, default_value_t = 7000, env = "MSB_BRIDGE_PORT")]
     bridge_port: i32,
+
+    /// Namespace where the controller runs and holds its leader-election Lease.
+    #[arg(long, default_value = "msb-system", env = "MSB_NAMESPACE")]
+    namespace: String,
+
+    /// Leader-election lease lifetime. A standby acquires after this elapses
+    /// without a renewal from the current leader.
+    #[arg(long, default_value = "15", env = "MSB_LEASE_TTL_SECS")]
+    lease_ttl_secs: u64,
 }
 
 #[tokio::main]
@@ -72,23 +83,43 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("listing Sandboxes; is the CRD applied?")?;
 
-    info!(%config, "starting controller");
+    // Unique per replica: pod hostname distinguishes holders; pid disambiguates
+    // if two ever share a hostname (e.g. host-network).
+    let holder_id = format!(
+        "{}-{}",
+        hostname::get()?.to_string_lossy(),
+        std::process::id()
+    );
 
-    Controller::new(sandboxes, watcher::Config::default())
-        .owns(pods, watcher::Config::default())
-        .shutdown_on_signal()
-        .run(
-            controller::reconcile,
-            controller::error_policy,
-            Arc::new(Context { client, config }),
-        )
-        .for_each(|res| async move {
-            match res {
-                Ok((obj, _)) => info!(sandbox = %obj.name, "reconciled"),
-                Err(error) => warn!(%error, "reconcile error"),
-            }
-        })
-        .await;
+    info!(%config, holder = %holder_id, "starting controller");
+
+    let client_for_lease = client.clone();
+    let run_controller = || async move {
+        Controller::new(sandboxes, watcher::Config::default())
+            .owns(pods, watcher::Config::default())
+            .shutdown_on_signal()
+            .run(
+                controller::reconcile,
+                controller::error_policy,
+                Arc::new(Context { client, config }),
+            )
+            .for_each(|res| async move {
+                match res {
+                    Ok((obj, _)) => info!(sandbox = %obj.name, "reconciled"),
+                    Err(error) => warn!(%error, "reconcile error"),
+                }
+            })
+            .await;
+    };
+
+    leader::run_when_leader(
+        client_for_lease,
+        &cli.namespace,
+        &holder_id,
+        Duration::from_secs(cli.lease_ttl_secs),
+        run_controller,
+    )
+    .await?;
 
     Ok(())
 }

@@ -1,0 +1,39 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: msb-controller
+rules:
+- apiGroups:
+  - sandbox.microsandbox.io
+  resources:
+  - sandboxes
+  verbs:
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - sandbox.microsandbox.io
+  resources:
+  - sandboxes/status
+  verbs:
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - create
+  - patch
