@@ -115,6 +115,7 @@ spec:
                       properties:
                         containerPort:
                           format: uint16
+                          maximum: 65535.0
                           minimum: 0.0
                           type: integer
                         protocol:
@@ -139,6 +140,7 @@ spec:
                           properties:
                             port:
                               format: uint16
+                              maximum: 65535.0
                               minimum: 0.0
                               type: integer
                           required:
@@ -237,6 +239,7 @@ spec:
                 - Running
                 - Succeeded
                 - Failed
+                - null
                 nullable: true
                 type: string
               podName:
@@ -259,6 +262,7 @@ spec:
                 - OOMKilled
                 - Evicted
                 - NodeLost
+                - null
                 nullable: true
                 type: string
             type: object

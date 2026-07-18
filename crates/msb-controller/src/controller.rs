@@ -289,9 +289,7 @@ fn is_not_found(err: &kube::Error) -> bool {
 }
 
 fn now_rfc3339() -> String {
-    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now())
-        .0
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
@@ -457,20 +455,12 @@ mod tests {
 
     #[test]
     fn not_found_is_recognised_so_delete_is_idempotent() {
-        let err = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
-            message: "not found".to_string(),
-            reason: "NotFound".to_string(),
-            code: 404,
-        });
-        assert!(is_not_found(&err));
+        let mut not_found = kube::core::Status::failure("not found", "NotFound");
+        not_found.code = 404;
+        assert!(is_not_found(&kube::Error::Api(not_found.boxed())));
 
-        let conflict = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
-            message: "conflict".to_string(),
-            reason: "Conflict".to_string(),
-            code: 409,
-        });
-        assert!(!is_not_found(&conflict));
+        let mut conflict = kube::core::Status::failure("conflict", "Conflict");
+        conflict.code = 409;
+        assert!(!is_not_found(&kube::Error::Api(conflict.boxed())));
     }
 }
