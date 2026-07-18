@@ -43,6 +43,8 @@ anyhow = "1"
 
 # tracing
 tracing = "0.1"
+# Keep default features: `tracing-log` bridges `log`-emitting deps (e.g.
+# kube-leader-election) into tracing. Do not add default-features = false.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # cli
