@@ -99,6 +99,31 @@ pub struct SecretKeyRef {
     pub key: String,
 }
 
+/// A secret the prerunner has resolved to plaintext, handed to the runtime over
+/// the shared config volume. Not part of the CRD — the on-disk contract between
+/// the two containers. `value` is plaintext and must stay on the tmpfs mount.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedSecret {
+    pub env: String,
+    pub value: String,
+    pub placeholder: String,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+}
+
+// Redact `value` — a resolved secret must never reach a log line.
+impl std::fmt::Debug for ResolvedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSecret")
+            .field("env", &self.env)
+            .field("value", &"<redacted>")
+            .field("placeholder", &self.placeholder)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .finish()
+    }
+}
+
 // --- Network ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

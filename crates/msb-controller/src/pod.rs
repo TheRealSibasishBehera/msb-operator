@@ -32,6 +32,10 @@ const VOL_HOME: &str = "msb-home";
 const VOL_CONFIG: &str = "msb-config";
 const VOL_CACHE: &str = "msb-cache";
 
+/// Per-namespace ServiceAccount the sandbox pod runs under; grants the prerunner
+/// `secrets: get`. Provisioned by the controller on first sandbox in a namespace.
+const PRERUNNER_SA: &str = "msb-prerunner";
+
 /// Sandbox pods run as this fixed non-root uid; `/root/.microsandbox` (msb's
 /// default home) is unreadable to it, which is why MSB_HOME is set explicitly.
 const RUN_AS_USER: i64 = 1000;
@@ -89,16 +93,25 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         ("microsandbox.io/sandbox-name".to_string(), name.clone()),
     ]);
 
+    // The user-facing app image. The pod's cache volume references a derived
+    // cache-image tag, so record the original image here to keep the pod
+    // self-describing (`kubectl describe` shows what it actually runs).
+    let annotations = BTreeMap::from([(
+        "microsandbox.io/image".to_string(),
+        sandbox.spec.image.clone(),
+    )]);
+
     Ok(Pod {
         metadata: ObjectMeta {
             name: Some(pod_name(&name)),
-            namespace: Some(namespace),
+            namespace: Some(namespace.clone()),
             labels: Some(labels),
+            annotations: Some(annotations),
             owner_references: Some(vec![owner]),
             ..Default::default()
         },
         spec: Some(PodSpec {
-            init_containers: Some(vec![prerunner_container(cfg, &spec_json)]),
+            init_containers: Some(vec![prerunner_container(cfg, &spec_json, &namespace)]),
             containers: vec![
                 runtime_container(
                     cfg,
@@ -109,7 +122,10 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
                 ),
                 bridge_container(cfg),
             ],
-            volumes: Some(volumes(&sandbox.spec.image)),
+            volumes: Some(volumes(&cfg.cache_ref(&sandbox.spec.image))),
+            // The per-namespace prerunner ServiceAccount (secrets: get). The
+            // controller provisions it on first sandbox in a namespace.
+            service_account_name: Some(PRERUNNER_SA.to_string()),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
                 run_as_user: Some(RUN_AS_USER),
@@ -131,15 +147,24 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
     })
 }
 
-fn prerunner_container(cfg: &ControllerConfig, spec_json: &str) -> Container {
+fn prerunner_container(cfg: &ControllerConfig, spec_json: &str, namespace: &str) -> Container {
     Container {
         name: "msb-prerunner".to_string(),
         image: Some(cfg.prerunner_image.clone()),
-        env: Some(vec![EnvVar {
-            name: "MSB_SANDBOX_SPEC".to_string(),
-            value: Some(spec_json.to_string()),
-            ..Default::default()
-        }]),
+        // Resolves secretKeyRefs in the sandbox's namespace and writes the
+        // resolved secrets to the shared config volume for the runtime.
+        env: Some(vec![
+            EnvVar {
+                name: "MSB_SANDBOX_SPEC".to_string(),
+                value: Some(spec_json.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "MSB_NAMESPACE".to_string(),
+                value: Some(namespace.to_string()),
+                ..Default::default()
+            },
+        ]),
         volume_mounts: Some(vec![VolumeMount {
             name: VOL_CONFIG.to_string(),
             mount_path: CONFIG_MOUNT.to_string(),
@@ -288,7 +313,7 @@ fn bridge_container(cfg: &ControllerConfig) -> Container {
     }
 }
 
-fn volumes(image: &str) -> Vec<Volume> {
+fn volumes(cache_ref: &str) -> Vec<Volume> {
     vec![
         Volume {
             name: VOL_HOME.to_string(),
@@ -309,10 +334,10 @@ fn volumes(image: &str) -> Vec<Volume> {
         },
         Volume {
             name: VOL_CACHE.to_string(),
-            // spec.image is a pre-baked cache image the kubelet pulls as an
-            // image volume; msb boots from it in place.
+            // The pre-baked cache image (derived from the app image) the kubelet
+            // pulls as an image volume; msb boots from it in place.
             image: Some(ImageVolumeSource {
-                reference: Some(image.to_string()),
+                reference: Some(cache_ref.to_string()),
                 pull_policy: Some("IfNotPresent".to_string()),
             }),
             ..Default::default()
@@ -360,6 +385,7 @@ pub(crate) mod test_support {
             "ghcr.io/msb/runtime:dev",
             "ghcr.io/msb/bridge:dev",
             7000,
+            "reg.example.com/msb-cache",
         )
         .expect("valid test config")
     }
@@ -659,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn passes_the_spec_to_the_prerunner() {
+    fn passes_the_spec_and_namespace_to_the_prerunner() {
         let pod = build(&sandbox(), &config()).unwrap();
         let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
         let encoded = env_of(init, "MSB_SANDBOX_SPEC").expect("spec env var");
@@ -667,6 +693,24 @@ mod tests {
             serde_json::from_str(&encoded).expect("round-trips as JSON");
         assert_eq!(decoded["image"], "python:3.12");
         assert_eq!(decoded["cpus"], 2);
+        // The prerunner resolves secretKeyRefs in the sandbox's namespace.
+        assert_eq!(env_of(init, "MSB_NAMESPACE").as_deref(), Some("team-a"));
+    }
+
+    #[test]
+    fn pod_runs_under_the_prerunner_service_account() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        assert_eq!(
+            pod.spec.as_ref().unwrap().service_account_name.as_deref(),
+            Some("msb-prerunner")
+        );
+    }
+
+    #[test]
+    fn runtime_gets_no_rootfs_vmdk_env() {
+        // The runtime boots via the cache image reference, not a vmdk path.
+        let pod = build(&sandbox(), &config()).unwrap();
+        assert_eq!(env_of(container(&pod, "msb-runtime"), "MSB_ROOTFS_VMDK"), None);
     }
 
     #[test]
@@ -688,9 +732,23 @@ mod tests {
         assert!(home.empty_dir.is_some(), "home must be an emptyDir");
         assert!(home.host_path.is_none(), "home must not be a hostPath");
 
-        // The cache is the pre-baked image, referenced by spec.image.
+        // The cache volume references the DERIVED cache-image tag, not the raw
+        // app image (which msb keys the cache by, passed separately to the SDK).
         let cache = by_name(VOL_CACHE).image.as_ref().unwrap();
-        assert_eq!(cache.reference.as_deref(), Some("python:3.12"));
+        let reference = cache.reference.as_deref().unwrap();
+        assert_eq!(reference, config().cache_ref("python:3.12"));
+        assert!(reference.starts_with("reg.example.com/msb-cache/python-3-12-"));
+        assert_ne!(reference, "python:3.12");
+    }
+
+    #[test]
+    fn records_the_app_image_as_a_pod_annotation() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let ann = pod.metadata.annotations.as_ref().unwrap();
+        assert_eq!(
+            ann.get("microsandbox.io/image").map(String::as_str),
+            Some("python:3.12")
+        );
     }
 
     #[test]

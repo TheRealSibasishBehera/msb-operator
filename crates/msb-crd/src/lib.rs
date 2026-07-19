@@ -1,6 +1,6 @@
 pub mod sandbox;
 
 pub use sandbox::{
-    RunPolicy, Sandbox, SandboxCondition, SandboxPhase, SandboxSpec, SandboxStatus,
+    ResolvedSecret, RunPolicy, Sandbox, SandboxCondition, SandboxPhase, SandboxSpec, SandboxStatus,
     TerminationReason,
 };

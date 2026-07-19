@@ -1,6 +1,6 @@
 [package]
 name = "msb-prerunner"
-description = "Init container — resolves secrets and writes LaunchConfig to emptyDir."
+description = "Init container — resolves secrets to the shared config volume."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -21,7 +21,6 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-sha2 = "0.11.0"
 clap = { workspace = true, features = ["derive", "env"] }
 
 [[bin]]

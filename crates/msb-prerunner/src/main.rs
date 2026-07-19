@@ -1,4 +1,3 @@
-mod launch;
 mod secrets;
 
 use std::collections::BTreeMap;
@@ -9,11 +8,13 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
-use msb_crd::SandboxSpec;
+use msb_crd::{ResolvedSecret, SandboxSpec};
 use tracing::info;
 
-/// Init container: resolve `secretKeyRef`s and write the msb `LaunchConfig` to
-/// the shared config volume. (Binary sideload lives in the image entrypoint.)
+/// Init container: resolve `secretKeyRef`s from the API and write the resolved
+/// secrets to the shared config volume for the runtime to load. The runtime
+/// builds the boot config itself via the SDK; the prerunner only handles the
+/// part that needs Secret-read access.
 #[derive(Parser)]
 #[command(name = "msb-prerunner")]
 struct Cli {
@@ -22,29 +23,13 @@ struct Cli {
     #[arg(long, env = "MSB_SANDBOX_SPEC")]
     spec: String,
 
-    /// msb's flat sandbox name (already encoded from namespace/name).
-    #[arg(long, env = "MSB_SANDBOX_NAME")]
-    sandbox_name: String,
-
+    /// Namespace to resolve `secretKeyRef`s in.
     #[arg(long, env = "MSB_NAMESPACE")]
     namespace: String,
 
-    #[arg(long, default_value = "/msb", env = "MSB_HOME")]
-    msb_home: PathBuf,
-
-    /// Baked cache VMDK the sandbox boots from.
-    #[arg(long, env = "MSB_ROOTFS_VMDK")]
-    rootfs_vmdk: PathBuf,
-
-    #[arg(
-        long,
-        default_value = "/msb-bin/libkrunfw.so",
-        env = "MSB_LIBKRUNFW_PATH"
-    )]
-    libkrunfw_path: PathBuf,
-
-    #[arg(long, default_value = "/msb-config/sandbox.json")]
-    config_out: PathBuf,
+    /// Where to write the resolved secrets (on the shared tmpfs).
+    #[arg(long, default_value = "/msb-config/secrets.json", env = "MSB_SECRETS_OUT")]
+    secrets_out: PathBuf,
 }
 
 #[tokio::main]
@@ -58,29 +43,23 @@ async fn main() -> Result<()> {
     let spec: SandboxSpec =
         serde_json::from_str(&cli.spec).context("parsing MSB_SANDBOX_SPEC as SandboxSpec")?;
 
-    let resolved = resolve_secrets(&spec, &cli.namespace).await?;
-    let secret_entries =
-        secrets::resolve(&spec.secrets, &resolved).context("building resolved secret entries")?;
+    let fetched = fetch_secrets(&spec, &cli.namespace).await?;
+    let resolved = secrets::resolve(&spec.secrets, &fetched).context("resolving secrets")?;
 
-    let config = launch::build(
-        &spec,
-        &cli.msb_home,
-        &cli.sandbox_name,
-        cli.rootfs_vmdk,
-        cli.libkrunfw_path,
-        secret_entries,
+    write_secrets(&cli.secrets_out, &resolved)?;
+    info!(
+        count = resolved.len(),
+        out = %cli.secrets_out.display(),
+        "wrote resolved secrets"
     );
-
-    write_config(&cli.config_out, &config)?;
-    info!(sandbox = %cli.sandbox_name, out = %cli.config_out.display(), "wrote LaunchConfig");
 
     Ok(())
 }
 
 /// Fetches every referenced Secret key from the API. A missing Secret or key is
-/// a hard error: the pod enters `Init:Error` and `msb-runtime` never starts,
-/// which is the intended fail-closed behaviour for a missing secret.
-async fn resolve_secrets(
+/// a hard error: the pod enters `Init:Error` and the runtime never starts, which
+/// is the intended fail-closed behaviour for a missing secret.
+async fn fetch_secrets(
     spec: &SandboxSpec,
     namespace: &str,
 ) -> Result<BTreeMap<(String, String), String>> {
@@ -130,11 +109,11 @@ fn secret_value(secret: &Secret, key: &str) -> Result<String> {
     bail!("key {key} not present in Secret")
 }
 
-/// Writes the config mode 0600 via a temp file + atomic rename, so `msb-runtime`
-/// never sees a half-written config. 0600 (despite tmpfs) keeps the plaintext
-/// unreadable to any other uid sharing the pod.
-fn write_config(path: &std::path::Path, config: &launch::LaunchConfig) -> Result<()> {
-    let json = serde_json::to_vec(config).context("serialising LaunchConfig")?;
+/// Writes the resolved secrets mode 0600 via a temp file + atomic rename, so the
+/// runtime never reads a half-written file. 0600 (despite tmpfs) keeps the
+/// plaintext unreadable to any other uid sharing the pod.
+fn write_secrets(path: &std::path::Path, resolved: &[ResolvedSecret]) -> Result<()> {
+    let json = serde_json::to_vec(resolved).context("serialising resolved secrets")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
