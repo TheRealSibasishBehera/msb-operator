@@ -13,9 +13,24 @@ pub const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
 pub const FIELD_MANAGER: &str = "msb-controller";
 
 pub const CONFIG_MOUNT: &str = "/msb-config";
-/// The pre-baked cache image volume mounts here (ADR 0003). Must be
-/// `$MSB_HOME/cache` so the VMDK's baked absolute paths resolve.
+/// Must be `$MSB_HOME/cache` so the cache's baked absolute VMDK paths resolve.
 pub const CACHE_MOUNT: &str = "/msb/cache";
+
+// Runtime-container resource sizing. On top of the guest RAM the pod carries the
+// VMM + runtime process overhead. The base is calibrated from a measured idle
+// boot (runtime + VMM peak ≈ 75Mi at 512Mi/1vCPU), rounded up for headroom.
+pub const RUNTIME_BASE_OVERHEAD_MIB: u64 = 96;
+pub const PER_VCPU_OVERHEAD_MIB: u64 = 8;
+/// Shared-CPU allocation ratio: cpu request = vCPUs/ratio.
+pub const CPU_ALLOCATION_RATIO: u64 = 10;
+pub const EPHEMERAL_STORAGE_MIB: u64 = 50;
+
+/// Overhead added to guest RAM. The `guest/512` term is the page-table cost
+/// (one bit per 512 bytes of RAM); the rest is the process base and per-vCPU
+/// structures.
+pub fn memory_overhead_mib(guest_mib: u64, vcpus: u64) -> u64 {
+    RUNTIME_BASE_OVERHEAD_MIB + guest_mib / 512 + PER_VCPU_OVERHEAD_MIB * vcpus
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
