@@ -5,6 +5,8 @@
 //! tears down the container cgroup and kills the VMM with it, so the runtime
 //! process has to live as long as the sandbox does.
 
+mod net;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -13,7 +15,7 @@ use microsandbox::Sandbox;
 use microsandbox::config::set_sdk_msb_path;
 use microsandbox::sandbox::PullPolicy;
 use microsandbox::set_libkrunfw_path;
-use msb_crd::SandboxSpec;
+use msb_crd::{ResolvedSecret, SandboxSpec};
 use tracing::info;
 
 #[derive(Parser)]
@@ -40,6 +42,20 @@ struct Cli {
 
     #[arg(long, default_value = "/msb", env = "MSB_HOME")]
     msb_home: PathBuf,
+
+    /// Resolved secrets written by the prerunner. Absent means no secrets.
+    #[arg(long, default_value = "/msb-config/secrets.json", env = "MSB_SECRETS")]
+    secrets: PathBuf,
+}
+
+/// Loads the prerunner's resolved secrets. A missing file means the sandbox has
+/// no secrets (the prerunner skips the write when `spec.secrets` is empty).
+fn load_secrets(path: &std::path::Path) -> Result<Vec<ResolvedSecret>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("parsing resolved secrets"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 #[tokio::main]
@@ -50,6 +66,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let spec: SandboxSpec = serde_json::from_str(&cli.spec).context("parsing MSB_SANDBOX_SPEC")?;
+    let secrets = load_secrets(&cli.secrets)?;
 
     // The SDK's own setters, not env mutation — the workspace forbids unsafe.
     set_sdk_msb_path(&cli.msb_path);
@@ -68,6 +85,10 @@ async fn main() -> Result<()> {
     if !spec.cmd.is_empty() {
         builder = builder.initial_command(spec.cmd.clone());
     }
+
+    // Apply the network policy and secret substitution; without this the guest
+    // boots with neither.
+    builder = net::apply(builder, &spec, &secrets);
 
     info!(
         sandbox = %cli.sandbox_name,

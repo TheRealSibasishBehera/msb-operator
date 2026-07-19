@@ -55,9 +55,14 @@ pub struct ControllerConfig {
     pub runtime_image: String,
     pub bridge_image: String,
     pub bridge_port: i32,
+    /// Registry/repo prefix for pre-baked cache images. The controller derives a
+    /// sandbox's cache-image reference as `<prefix>/<slug>-<hash>` from
+    /// `spec.image`. Empty means no prefix (bare derived name — for local tags).
+    pub cache_prefix: String,
 }
 
 impl ControllerConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         msb_home: impl Into<String>,
         kvm_gid: i64,
@@ -65,6 +70,7 @@ impl ControllerConfig {
         runtime_image: impl Into<String>,
         bridge_image: impl Into<String>,
         bridge_port: i32,
+        cache_prefix: impl Into<String>,
     ) -> Result<Self, ConfigError> {
         let msb_home = msb_home.into();
 
@@ -85,12 +91,58 @@ impl ControllerConfig {
             runtime_image: runtime_image.into(),
             bridge_image: bridge_image.into(),
             bridge_port,
+            cache_prefix: cache_prefix.into(),
         })
     }
 
     /// Validated at construction, so it cannot be set past `MSB_HOME_MAX_BYTES`.
     pub fn msb_home(&self) -> &str {
         &self.msb_home
+    }
+
+    /// The pre-baked cache image reference for a given app image. `spec.image`
+    /// is the app ref msb keys the cache by; this is where the kubelet pulls the
+    /// cache from. See [`derive_cache_ref`].
+    pub fn cache_ref(&self, app_image: &str) -> String {
+        derive_cache_ref(&self.cache_prefix, app_image)
+    }
+}
+
+/// Maps an app image reference to its pre-baked cache image reference:
+/// `<prefix>/<slug>-<hash>`, where `slug` is the last path segment plus tag
+/// (sanitized to `[a-z0-9-]`, capped) and `hash` is the first 12 hex of
+/// `sha256(app_image)`. The hash makes it collision-free; the slug keeps it
+/// legible. **The cache-build tooling must compute this identically** — the
+/// algorithm is the contract between the two.
+pub fn derive_cache_ref(prefix: &str, app_image: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(app_image.as_bytes()));
+    let short = &hash[..12];
+
+    // Last path segment (drop registry/repo), then normalize `:`/`@` to `-`.
+    let last = app_image.rsplit('/').next().unwrap_or(app_image);
+    let mut slug: String = last
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Collapse runs of `-`, trim, and cap so the tag stays a sane length.
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let slug = slug.trim_matches('-');
+    let slug: String = slug.chars().take(40).collect();
+
+    let name = format!("{slug}-{short}");
+    if prefix.is_empty() {
+        name
+    } else {
+        format!("{}/{name}", prefix.trim_end_matches('/'))
     }
 }
 
@@ -112,7 +164,57 @@ mod tests {
             "runtime:dev",
             "bridge:dev",
             7000,
+            "registry.example.com/msb-cache",
         )
+    }
+
+    #[test]
+    fn derives_cache_ref_with_slug_and_hash() {
+        let r = derive_cache_ref("reg/msb-cache", "alpine:3.20");
+        // <prefix>/<slug>-<12 hex>; slug from last segment, `:` -> `-`.
+        assert!(r.starts_with("reg/msb-cache/alpine-3-20-"), "{r}");
+        let hash = r.rsplit('-').next().unwrap();
+        assert_eq!(hash.len(), 12);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn cache_ref_drops_registry_and_repo_from_slug() {
+        let r = derive_cache_ref("p", "ghcr.io/foo/bar:v1");
+        assert!(r.starts_with("p/bar-v1-"), "{r}");
+    }
+
+    #[test]
+    fn cache_ref_is_collision_free_across_similar_refs() {
+        // Different full refs must not share a cache ref even if slugs match.
+        let a = derive_cache_ref("p", "foo/bar:1");
+        let b = derive_cache_ref("p", "baz/bar:1");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn empty_prefix_yields_bare_derived_name() {
+        let r = derive_cache_ref("", "alpine:3.20");
+        assert!(r.starts_with("alpine-3-20-"), "{r}");
+        assert!(!r.contains('/'), "{r}");
+    }
+
+    #[test]
+    fn cache_ref_matches_the_build_tooling_golden_values() {
+        // Pins the exact output so drift from docker/cache-image/build.sh's
+        // derive_cache_ref (which must stay identical) is caught.
+        assert_eq!(
+            derive_cache_ref("reg/msb-cache", "alpine:3.20"),
+            "reg/msb-cache/alpine-3-20-d3dfed77bb64"
+        );
+        assert_eq!(
+            derive_cache_ref("reg/msb-cache", "python:3.12"),
+            "reg/msb-cache/python-3-12-e3efd51c9a35"
+        );
+        assert_eq!(
+            derive_cache_ref("reg/msb-cache", "ghcr.io/foo/bar:v1"),
+            "reg/msb-cache/bar-v1-02f3f049157a"
+        );
     }
 
     #[test]

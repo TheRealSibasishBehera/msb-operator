@@ -1,14 +1,13 @@
-//! Resolving `spec.secrets[]` into the plaintext `SecretEntry` values msb wants.
+//! Resolving `spec.secrets[]` into plaintext `ResolvedSecret`s for the runtime.
 //!
 //! The guest's env var holds a *placeholder*, never the real value; msb's proxy
-//! swaps placeholder → value in outbound traffic to `allowed_hosts`. So the
-//! plaintext lives only in the config on the tmpfs and in msb's memory.
+//! swaps placeholder → value in outbound traffic to `allowed_hosts`. The
+//! plaintext lives only in the resolved file on the tmpfs and in msb's memory.
 
 use std::collections::BTreeMap;
 
+use msb_crd::ResolvedSecret;
 use msb_crd::sandbox::SecretEntry as SpecSecret;
-
-use crate::launch::{HostPattern, SecretEntry};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
@@ -49,13 +48,13 @@ fn placeholder_for(env_var: &str) -> String {
     format!("msb_secret_{env_var}")
 }
 
-/// Translates CRD secrets into resolved `SecretEntry`s. `resolved` maps
+/// Translates CRD secrets into `ResolvedSecret`s. `resolved` maps
 /// `(secret_name, key)` to the fetched plaintext; a missing entry is a hard
 /// error so the pod fails to start rather than booting with an empty secret.
 pub fn resolve(
     specs: &[SpecSecret],
     resolved: &BTreeMap<(String, String), String>,
-) -> Result<Vec<SecretEntry>, SecretError> {
+) -> Result<Vec<ResolvedSecret>, SecretError> {
     let mut env_seen = std::collections::BTreeSet::new();
     specs
         .iter()
@@ -76,31 +75,31 @@ pub fn resolve(
             let allowed_hosts = s
                 .allowed_hosts
                 .iter()
-                .map(|h| host_pattern(&s.env, h))
+                .map(|h| validate_host(&s.env, h))
                 .collect::<Result<_, _>>()?;
-            Ok(SecretEntry {
-                env_var: s.env.clone(),
+            Ok(ResolvedSecret {
+                env: s.env.clone(),
                 value,
                 placeholder: placeholder_for(&s.env),
                 allowed_hosts,
-                require_tls_identity: true,
             })
         })
         .collect()
 }
 
-/// `*.suffix` → wildcard, else an exact host. Rejects garbage that would
-/// silently mis-substitute: a bare `*`, an empty host, or `*.` with no suffix.
-fn host_pattern(env: &str, host: &str) -> Result<HostPattern, SecretError> {
+/// Passes through `*.suffix` and exact hosts; the SDK interprets the wildcard.
+/// Rejects garbage that would silently mis-substitute: a bare `*`, an empty
+/// host, or `*.` with no suffix.
+fn validate_host(env: &str, host: &str) -> Result<String, SecretError> {
     let invalid = || SecretError::InvalidHost {
         env: env.to_string(),
         host: host.to_string(),
     };
     match host.strip_prefix("*.") {
         Some("") => Err(invalid()),
-        Some(suffix) => Ok(HostPattern::Wildcard(suffix.to_string())),
+        Some(_) => Ok(host.to_string()),
         None if host.is_empty() || host.contains('*') => Err(invalid()),
-        None => Ok(HostPattern::Exact(host.to_string())),
+        None => Ok(host.to_string()),
     }
 }
 
@@ -129,10 +128,9 @@ mod tests {
 
         let out = resolve(&specs, &resolved).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].env_var, "API_KEY");
+        assert_eq!(out[0].env, "API_KEY");
         assert_eq!(out[0].value, "sk-live-xyz");
         assert_eq!(out[0].placeholder, "msb_secret_API_KEY");
-        assert!(out[0].require_tls_identity);
     }
 
     #[test]
@@ -143,12 +141,11 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_and_exact_hosts() {
+    fn wildcard_and_exact_hosts_pass_through() {
         let specs = vec![spec_secret("K", "s", "k", &["*.openai.com", "exact.com"])];
         let resolved = BTreeMap::from([(("s".into(), "k".into()), "v".into())]);
         let out = resolve(&specs, &resolved).unwrap();
-        assert!(matches!(&out[0].allowed_hosts[0], HostPattern::Wildcard(h) if h == "openai.com"));
-        assert!(matches!(&out[0].allowed_hosts[1], HostPattern::Exact(h) if h == "exact.com"));
+        assert_eq!(out[0].allowed_hosts, vec!["*.openai.com", "exact.com"]);
     }
 
     #[test]
