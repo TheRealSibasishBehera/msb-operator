@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, ImageVolumeSource, Pod,
-    PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile, SecurityContext, Volume,
-    VolumeMount,
+    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, ImageVolumeSource,
+    KeyToPath, Pod, PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile,
+    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Resource;
-use msb_crd::Sandbox;
+use msb_crd::{Sandbox, SandboxSpec};
 
 use crate::config::{
     CACHE_MOUNT, CONFIG_MOUNT, CPU_ALLOCATION_RATIO, ControllerConfig, EPHEMERAL_STORAGE_MIB,
@@ -32,9 +32,10 @@ const VOL_HOME: &str = "msb-home";
 const VOL_CONFIG: &str = "msb-config";
 const VOL_CACHE: &str = "msb-cache";
 
-/// Per-namespace ServiceAccount the sandbox pod runs under; grants the prerunner
-/// `secrets: get`. Provisioned by the controller on first sandbox in a namespace.
-const PRERUNNER_SA: &str = "msb-prerunner";
+/// Referenced Secrets mount read-only here, one dir per Secret; the prerunner
+/// reads `<SECRETS_MOUNT>/<secretName>/<key>`. The kubelet does the read, so the
+/// pod needs no Secret RBAC.
+const SECRETS_MOUNT: &str = "/msb-secrets";
 
 /// Sandbox pods run as this fixed non-root uid; `/root/.microsandbox` (msb's
 /// default home) is unreadable to it, which is why MSB_HOME is set explicitly.
@@ -93,9 +94,8 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         ("microsandbox.io/sandbox-name".to_string(), name.clone()),
     ]);
 
-    // The user-facing app image. The pod's cache volume references a derived
-    // cache-image tag, so record the original image here to keep the pod
-    // self-describing (`kubectl describe` shows what it actually runs).
+    // The cache volume references a derived tag, so record the user's app image
+    // here to keep the pod self-describing.
     let annotations = BTreeMap::from([(
         "microsandbox.io/image".to_string(),
         sandbox.spec.image.clone(),
@@ -111,7 +111,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
             ..Default::default()
         },
         spec: Some(PodSpec {
-            init_containers: Some(vec![prerunner_container(cfg, &spec_json, &namespace)]),
+            init_containers: Some(vec![prerunner_container(cfg, &spec_json, &sandbox.spec)]),
             containers: vec![
                 runtime_container(
                     cfg,
@@ -122,10 +122,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
                 ),
                 bridge_container(cfg),
             ],
-            volumes: Some(volumes(&cfg.cache_ref(&sandbox.spec.image))),
-            // The per-namespace prerunner ServiceAccount (secrets: get). The
-            // controller provisions it on first sandbox in a namespace.
-            service_account_name: Some(PRERUNNER_SA.to_string()),
+            volumes: Some(volumes(&cfg.cache_ref(&sandbox.spec.image), &sandbox.spec)),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
                 run_as_user: Some(RUN_AS_USER),
@@ -147,29 +144,34 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
     })
 }
 
-fn prerunner_container(cfg: &ControllerConfig, spec_json: &str, namespace: &str) -> Container {
+fn prerunner_container(cfg: &ControllerConfig, spec_json: &str, spec: &SandboxSpec) -> Container {
+    // The config volume it writes to, plus one read-only mount per referenced
+    // Secret for it to read.
+    let mut mounts = vec![VolumeMount {
+        name: VOL_CONFIG.to_string(),
+        mount_path: CONFIG_MOUNT.to_string(),
+        ..Default::default()
+    }];
+    for secret_name in referenced_secret_names(spec) {
+        mounts.push(VolumeMount {
+            name: secret_vol_name(&secret_name),
+            mount_path: format!("{SECRETS_MOUNT}/{secret_name}"),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
+
     Container {
         name: "msb-prerunner".to_string(),
         image: Some(cfg.prerunner_image.clone()),
-        // Resolves secretKeyRefs in the sandbox's namespace and writes the
+        // Reads secret plaintext from the mounted Secret volumes and writes the
         // resolved secrets to the shared config volume for the runtime.
-        env: Some(vec![
-            EnvVar {
-                name: "MSB_SANDBOX_SPEC".to_string(),
-                value: Some(spec_json.to_string()),
-                ..Default::default()
-            },
-            EnvVar {
-                name: "MSB_NAMESPACE".to_string(),
-                value: Some(namespace.to_string()),
-                ..Default::default()
-            },
-        ]),
-        volume_mounts: Some(vec![VolumeMount {
-            name: VOL_CONFIG.to_string(),
-            mount_path: CONFIG_MOUNT.to_string(),
+        env: Some(vec![EnvVar {
+            name: "MSB_SANDBOX_SPEC".to_string(),
+            value: Some(spec_json.to_string()),
             ..Default::default()
         }]),
+        volume_mounts: Some(mounts),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
             // Writes only to its mounted volumes, never the container rootfs.
@@ -313,8 +315,30 @@ fn bridge_container(cfg: &ControllerConfig) -> Container {
     }
 }
 
-fn volumes(cache_ref: &str) -> Vec<Volume> {
-    vec![
+/// The distinct Secret names referenced by `spec.secrets`, in stable order.
+fn referenced_secret_names(spec: &SandboxSpec) -> Vec<String> {
+    let mut names: Vec<String> = spec
+        .secrets
+        .iter()
+        .map(|s| s.value_from.secret_key_ref.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Volume name for a referenced Secret. Sanitized to a DNS-1123 label since
+/// Secret names permit `.`, which volume names forbid.
+fn secret_vol_name(secret_name: &str) -> String {
+    let sanitized: String = secret_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("secret-{}", sanitized.trim_matches('-'))
+}
+
+fn volumes(cache_ref: &str, spec: &SandboxSpec) -> Vec<Volume> {
+    let mut vols = vec![
         Volume {
             name: VOL_HOME.to_string(),
             // Per-pod writable home (db/, sandboxes/, run/): keeps each sandbox's
@@ -342,7 +366,41 @@ fn volumes(cache_ref: &str) -> Vec<Volume> {
             }),
             ..Default::default()
         },
-    ]
+    ];
+
+    // One volume per referenced Secret, projecting only the referenced keys.
+    for secret_name in referenced_secret_names(spec) {
+        let mut keys: Vec<String> = spec
+            .secrets
+            .iter()
+            .filter(|s| s.value_from.secret_key_ref.name == secret_name)
+            .map(|s| s.value_from.secret_key_ref.key.clone())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        let items = keys
+            .into_iter()
+            .map(|key| KeyToPath {
+                path: key.clone(),
+                key,
+                ..Default::default()
+            })
+            .collect();
+        vols.push(Volume {
+            name: secret_vol_name(&secret_name),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(secret_name),
+                items: Some(items),
+                // Secret files are root-owned, so owner-only mode would deny the
+                // non-root uid the pod runs as. tmpfs, per-pod.
+                default_mode: Some(0o444),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+
+    vols
 }
 
 #[cfg(test)]
@@ -376,6 +434,28 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A sandbox with two secrets: two keys from `creds`, one from `db`.
+    pub fn sandbox_with_secrets() -> Sandbox {
+        use msb_crd::sandbox::{SecretEntry, SecretKeyRef, SecretValueFrom};
+        let entry = |env: &str, name: &str, key: &str| SecretEntry {
+            env: env.to_string(),
+            value_from: SecretValueFrom {
+                secret_key_ref: SecretKeyRef {
+                    name: name.to_string(),
+                    key: key.to_string(),
+                },
+            },
+            allowed_hosts: vec!["api.example.com".to_string()],
+        };
+        let mut sb = sandbox();
+        sb.spec.secrets = vec![
+            entry("API_KEY", "creds", "api"),
+            entry("ORG_ID", "creds", "org"),
+            entry("DB_PASS", "db", "password"),
+        ];
+        sb
+    }
+
     pub fn config() -> ControllerConfig {
         ControllerConfig::new(
             // MSB_HOME must be /msb so the cache's absolute VMDK paths resolve.
@@ -393,7 +473,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{config, sandbox};
+    use super::test_support::{config, sandbox, sandbox_with_secrets};
     use super::*;
 
     fn container<'a>(pod: &'a Pod, name: &str) -> &'a Container {
@@ -685,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn passes_the_spec_and_namespace_to_the_prerunner() {
+    fn passes_the_spec_to_the_prerunner() {
         let pod = build(&sandbox(), &config()).unwrap();
         let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
         let encoded = env_of(init, "MSB_SANDBOX_SPEC").expect("spec env var");
@@ -693,24 +773,72 @@ mod tests {
             serde_json::from_str(&encoded).expect("round-trips as JSON");
         assert_eq!(decoded["image"], "python:3.12");
         assert_eq!(decoded["cpus"], 2);
-        // The prerunner resolves secretKeyRefs in the sandbox's namespace.
-        assert_eq!(env_of(init, "MSB_NAMESPACE").as_deref(), Some("team-a"));
     }
 
     #[test]
-    fn pod_runs_under_the_prerunner_service_account() {
+    fn pod_uses_the_default_service_account() {
+        // No Secret RBAC needed — the kubelet mounts referenced Secrets.
         let pod = build(&sandbox(), &config()).unwrap();
-        assert_eq!(
-            pod.spec.as_ref().unwrap().service_account_name.as_deref(),
-            Some("msb-prerunner")
-        );
+        assert_eq!(pod.spec.as_ref().unwrap().service_account_name, None);
+    }
+
+    #[test]
+    fn mounts_one_volume_per_referenced_secret() {
+        let pod = build(&sandbox_with_secrets(), &config()).unwrap();
+        let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        let secret_vols: Vec<_> = vols.iter().filter(|v| v.secret.is_some()).collect();
+        // Two distinct Secrets (creds, db), one volume each.
+        assert_eq!(secret_vols.len(), 2);
+
+        let creds = secret_vols
+            .iter()
+            .find(|v| v.name == "secret-creds")
+            .expect("creds volume");
+        let src = creds.secret.as_ref().unwrap();
+        assert_eq!(src.secret_name.as_deref(), Some("creds"));
+        // Only the referenced keys are projected, each to a file named by key.
+        let mut paths: Vec<_> = src
+            .items
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|i| (i.key.as_str(), i.path.as_str()))
+            .collect();
+        paths.sort();
+        assert_eq!(paths, vec![("api", "api"), ("org", "org")]);
+        assert_eq!(src.default_mode, Some(0o444));
+    }
+
+    #[test]
+    fn prerunner_mounts_each_secret_read_only_under_msb_secrets() {
+        let pod = build(&sandbox_with_secrets(), &config()).unwrap();
+        let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
+        let mounts = init.volume_mounts.as_ref().unwrap();
+        for (name, path) in [
+            ("secret-creds", "/msb-secrets/creds"),
+            ("secret-db", "/msb-secrets/db"),
+        ] {
+            let m = mounts.iter().find(|m| m.name == name).expect(name);
+            assert_eq!(m.mount_path, path);
+            assert_eq!(m.read_only, Some(true));
+        }
+    }
+
+    #[test]
+    fn no_secret_volumes_when_no_secrets() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        assert!(vols.iter().all(|v| v.secret.is_none()));
     }
 
     #[test]
     fn runtime_gets_no_rootfs_vmdk_env() {
         // The runtime boots via the cache image reference, not a vmdk path.
         let pod = build(&sandbox(), &config()).unwrap();
-        assert_eq!(env_of(container(&pod, "msb-runtime"), "MSB_ROOTFS_VMDK"), None);
+        assert_eq!(
+            env_of(container(&pod, "msb-runtime"), "MSB_ROOTFS_VMDK"),
+            None
+        );
     }
 
     #[test]

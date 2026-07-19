@@ -12,9 +12,9 @@ workspace = true
 
 [dependencies]
 msb-crd = { path = "../msb-crd" }
-kube.workspace = true
+# Binary crate: selects the k8s-openapi API version for the graph (msb-crd is a
+# library and leaves it unset). The prerunner itself no longer calls the API.
 k8s-openapi = { version = "0.28", features = ["v1_32"], default-features = false }
-tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
