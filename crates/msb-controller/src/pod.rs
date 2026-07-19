@@ -1,16 +1,19 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, HostPathVolumeSource,
-    ImageVolumeSource, Pod, PodSecurityContext, PodSpec, ResourceRequirements, SecurityContext,
-    Volume, VolumeMount,
+    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, ImageVolumeSource, Pod,
+    PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile, SecurityContext, Volume,
+    VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Resource;
 use msb_crd::Sandbox;
 
-use crate::config::{CACHE_MOUNT, CONFIG_MOUNT, ControllerConfig, KVM_RESOURCE, SANDBOX_LABEL};
+use crate::config::{
+    CACHE_MOUNT, CONFIG_MOUNT, CPU_ALLOCATION_RATIO, ControllerConfig, EPHEMERAL_STORAGE_MIB,
+    KVM_RESOURCE, SANDBOX_LABEL, memory_overhead_mib,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PodBuildError {
@@ -37,9 +40,8 @@ pub fn pod_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }
 
-/// msb's flat sandbox name (ADR 0002): `<namespace>__<name>`. `_` is forbidden
-/// in Kubernetes names but permitted by msb, so `__` is the only unambiguous
-/// separator. The >128-byte hashed fallback is not yet needed here.
+/// msb's flat sandbox name: `<namespace>__<name>`. `_` is forbidden in
+/// Kubernetes names but permitted by msb, so `__` is an unambiguous separator.
 fn msb_sandbox_name(namespace: &str, name: &str) -> String {
     format!("{namespace}__{name}")
 }
@@ -98,16 +100,28 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         spec: Some(PodSpec {
             init_containers: Some(vec![prerunner_container(cfg, &spec_json)]),
             containers: vec![
-                runtime_container(cfg, &spec_json, &flat_name),
+                runtime_container(
+                    cfg,
+                    &spec_json,
+                    &flat_name,
+                    sandbox.spec.cpus,
+                    sandbox.spec.memory,
+                ),
                 bridge_container(cfg),
             ],
-            volumes: Some(volumes(cfg, &sandbox.spec.image)),
+            volumes: Some(volumes(&sandbox.spec.image)),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
                 run_as_user: Some(RUN_AS_USER),
                 // The device plugin handles the cgroup allowlist but not Unix DAC;
                 // /dev/kvm is crw-rw---- root:kvm, so the process must be in the group.
                 supplemental_groups: Some(vec![cfg.kvm_gid]),
+                // The KVM ioctls the runtime needs are not blocked by the
+                // runtime's default seccomp profile.
+                seccomp_profile: Some(SeccompProfile {
+                    type_: "RuntimeDefault".to_string(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             restart_policy: Some("Never".to_string()),
@@ -133,6 +147,8 @@ fn prerunner_container(cfg: &ControllerConfig, spec_json: &str) -> Container {
         }]),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
+            // Writes only to its mounted volumes, never the container rootfs.
+            read_only_root_filesystem: Some(true),
             capabilities: Some(Capabilities {
                 drop: Some(vec!["ALL".to_string()]),
                 add: None,
@@ -143,12 +159,18 @@ fn prerunner_container(cfg: &ControllerConfig, spec_json: &str) -> Container {
     }
 }
 
-fn runtime_container(cfg: &ControllerConfig, spec_json: &str, flat_name: &str) -> Container {
+fn runtime_container(
+    cfg: &ControllerConfig,
+    spec_json: &str,
+    flat_name: &str,
+    cpus: u32,
+    memory_mib: u32,
+) -> Container {
     Container {
         name: "msb-runtime".to_string(),
         image: Some(cfg.runtime_image.clone()),
-        // The runtime binary reads the spec and flat name; msb + libkrunfw are
-        // baked into the image (ADR 0004), so no binary paths are passed here.
+        // msb and libkrunfw are baked into the image, so only the spec and flat
+        // name are passed, not binary paths.
         env: Some(vec![
             EnvVar {
                 name: "MSB_SANDBOX_SPEC".to_string(),
@@ -178,9 +200,8 @@ fn runtime_container(cfg: &ControllerConfig, spec_json: &str, flat_name: &str) -
                 read_only: Some(true),
                 ..Default::default()
             },
-            // The pre-baked cache (ADR 0003), read-only: msb boots from it in
-            // place and never writes to cache/. Mounted at $MSB_HOME/cache so
-            // the VMDK's baked absolute paths resolve.
+            // msb boots from the cache in place and never writes to it. Mounted
+            // at $MSB_HOME/cache so the VMDK's baked absolute paths resolve.
             VolumeMount {
                 name: VOL_CACHE.to_string(),
                 mount_path: CACHE_MOUNT.to_string(),
@@ -188,23 +209,49 @@ fn runtime_container(cfg: &ControllerConfig, spec_json: &str, flat_name: &str) -
                 ..Default::default()
             },
         ]),
-        resources: Some(ResourceRequirements {
-            limits: Some(BTreeMap::from([(
-                KVM_RESOURCE.to_string(),
-                Quantity("1".to_string()),
-            )])),
-            ..Default::default()
-        }),
+        resources: Some(runtime_resources(cpus, memory_mib)),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
             capabilities: Some(Capabilities {
+                // msb's network is smoltcp — a userspace TCP/IP stack in-process
+                // (no tap/tun/vhost) — so the VMM needs no capabilities.
                 drop: Some(vec!["ALL".to_string()]),
-                // libkrun needs NET_ADMIN for its virtio-net setup. smoltcp is pure
-                // userspace and needs nothing; SYS_ADMIN is not required.
-                add: Some(vec!["NET_ADMIN".to_string()]),
+                add: None,
             }),
             ..Default::default()
         }),
+        ..Default::default()
+    }
+}
+
+/// Resources for the runtime container. Memory request == limit (guest RAM +
+/// overhead): the guest has a hard `--memory-mib` ceiling, so a matching limit
+/// is safe and keeps a busy sandbox from OOMing its neighbours. CPU requests a
+/// fraction of a core and limits to the advertised vCPUs.
+fn runtime_resources(cpus: u32, memory_mib: u32) -> ResourceRequirements {
+    let mem_total = memory_mib as u64 + memory_overhead_mib(memory_mib as u64, cpus as u64);
+    let mem_qty = Quantity(format!("{mem_total}Mi"));
+    let cpu_request = Quantity(format!(
+        "{}m",
+        (cpus as u64 * 1000).div_ceil(CPU_ALLOCATION_RATIO)
+    ));
+    let cpu_limit = Quantity(cpus.to_string());
+    let ephemeral = Quantity(format!("{EPHEMERAL_STORAGE_MIB}Mi"));
+
+    let requests = BTreeMap::from([
+        ("memory".to_string(), mem_qty.clone()),
+        ("cpu".to_string(), cpu_request),
+        ("ephemeral-storage".to_string(), ephemeral),
+    ]);
+    let limits = BTreeMap::from([
+        ("memory".to_string(), mem_qty),
+        ("cpu".to_string(), cpu_limit),
+        (KVM_RESOURCE.to_string(), Quantity("1".to_string())),
+    ]);
+
+    ResourceRequirements {
+        requests: Some(requests),
+        limits: Some(limits),
         ..Default::default()
     }
 }
@@ -229,6 +276,8 @@ fn bridge_container(cfg: &ControllerConfig) -> Container {
         }]),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
+            // Writes only to its mounted volumes, never the container rootfs.
+            read_only_root_filesystem: Some(true),
             capabilities: Some(Capabilities {
                 drop: Some(vec!["ALL".to_string()]),
                 add: None,
@@ -239,14 +288,14 @@ fn bridge_container(cfg: &ControllerConfig) -> Container {
     }
 }
 
-fn volumes(cfg: &ControllerConfig, image: &str) -> Vec<Volume> {
+fn volumes(image: &str) -> Vec<Volume> {
     vec![
         Volume {
             name: VOL_HOME.to_string(),
-            host_path: Some(HostPathVolumeSource {
-                path: cfg.msb_home().to_string(),
-                type_: Some("DirectoryOrCreate".to_string()),
-            }),
+            // Per-pod writable home (db/, sandboxes/, run/): keeps each sandbox's
+            // state off the node and invisible to other pods. The shared cache is
+            // a separate read-only image volume.
+            empty_dir: Some(EmptyDirVolumeSource::default()),
             ..Default::default()
         },
         Volume {
@@ -260,8 +309,8 @@ fn volumes(cfg: &ControllerConfig, image: &str) -> Vec<Volume> {
         },
         Volume {
             name: VOL_CACHE.to_string(),
-            // spec.image is a pre-baked cache image (ADR 0003), pulled by the
-            // kubelet as a KEP-4639 image volume and booted in place.
+            // spec.image is a pre-baked cache image the kubelet pulls as an
+            // image volume; msb boots from it in place.
             image: Some(ImageVolumeSource {
                 reference: Some(image.to_string()),
                 pull_policy: Some("IfNotPresent".to_string()),
@@ -304,8 +353,7 @@ pub(crate) mod test_support {
 
     pub fn config() -> ControllerConfig {
         ControllerConfig::new(
-            // MSB_HOME must be /msb so the pre-baked cache's absolute VMDK paths
-            // resolve at $MSB_HOME/cache (ADR 0003).
+            // MSB_HOME must be /msb so the cache's absolute VMDK paths resolve.
             "/msb",
             104,
             "ghcr.io/msb/prerunner:dev",
@@ -328,6 +376,15 @@ mod tests {
             .unwrap()
             .containers
             .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no container named {name}"))
+    }
+
+    fn container_or_init<'a>(pod: &'a Pod, name: &str) -> &'a Container {
+        let spec = pod.spec.as_ref().unwrap();
+        spec.containers
+            .iter()
+            .chain(spec.init_containers.iter().flatten())
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("no container named {name}"))
     }
@@ -429,6 +486,80 @@ mod tests {
     }
 
     #[test]
+    fn runtime_memory_request_equals_limit_at_guest_plus_overhead() {
+        // Fixture: 2 vCPU, 1024Mi guest. overhead = 96 + 1024/512 + 8*2 = 114.
+        let pod = build(&sandbox(), &config()).unwrap();
+        let res = container(&pod, "msb-runtime").resources.as_ref().unwrap();
+        let req = res.requests.as_ref().unwrap();
+        let lim = res.limits.as_ref().unwrap();
+        let expected = Quantity("1138Mi".to_string());
+        assert_eq!(req.get("memory"), Some(&expected));
+        assert_eq!(lim.get("memory"), Some(&expected)); // Guaranteed for memory
+    }
+
+    #[test]
+    fn runtime_cpu_requests_a_fraction_and_limits_to_vcpus() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let res = container(&pod, "msb-runtime").resources.as_ref().unwrap();
+        assert_eq!(
+            res.requests.as_ref().unwrap().get("cpu"),
+            Some(&Quantity("200m".to_string())) // 2 vCPU / ratio 10
+        );
+        assert_eq!(
+            res.limits.as_ref().unwrap().get("cpu"),
+            Some(&Quantity("2".to_string())) // limited to the advertised vCPUs
+        );
+    }
+
+    #[test]
+    fn runtime_requests_ephemeral_storage() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let req = container(&pod, "msb-runtime")
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            req.get("ephemeral-storage"),
+            Some(&Quantity("50Mi".to_string()))
+        );
+    }
+
+    #[test]
+    fn pod_sets_runtime_default_seccomp() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let sc = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .security_context
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            sc.seccomp_profile.as_ref().map(|p| p.type_.as_str()),
+            Some("RuntimeDefault")
+        );
+    }
+
+    #[test]
+    fn sidecars_use_a_read_only_root_filesystem() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        for name in ["msb-prerunner", "msb-bridge"] {
+            let c = container_or_init(&pod, name);
+            assert_eq!(
+                c.security_context
+                    .as_ref()
+                    .unwrap()
+                    .read_only_root_filesystem,
+                Some(true),
+                "{name} should have a read-only rootfs"
+            );
+        }
+    }
+
+    #[test]
     fn runs_non_root_in_the_kvm_group() {
         let pod = build(&sandbox(), &config()).unwrap();
         let sc = pod
@@ -444,7 +575,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_drops_all_caps_and_adds_only_net_admin() {
+    fn runtime_drops_all_caps_and_adds_none() {
+        // msb's smoltcp net is pure userspace — no NET_ADMIN, no tap/tun.
         let pod = build(&sandbox(), &config()).unwrap();
         let caps = container(&pod, "msb-runtime")
             .security_context
@@ -454,7 +586,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
-        assert_eq!(caps.add, Some(vec!["NET_ADMIN".to_string()]));
+        assert_eq!(caps.add, None);
     }
 
     #[test]
@@ -479,14 +611,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_runtime_gets_net_admin() {
+    fn no_container_adds_any_capability() {
         let pod = build(&sandbox(), &config()).unwrap();
         let spec = pod.spec.as_ref().unwrap();
         for c in spec
             .containers
             .iter()
             .chain(spec.init_containers.iter().flatten())
-            .filter(|c| c.name != "msb-runtime")
         {
             let add = c
                 .security_context
@@ -502,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn points_msb_home_at_the_hostpath() {
+    fn sets_msb_home_env_on_the_runtime() {
         let pod = build(&sandbox(), &config()).unwrap();
         assert_eq!(
             env_of(container(&pod, "msb-runtime"), "MSB_HOME"),
@@ -547,16 +678,17 @@ mod tests {
     }
 
     #[test]
-    fn home_is_a_hostpath_and_cache_is_an_image_volume() {
+    fn home_is_a_per_pod_emptydir_and_cache_is_an_image_volume() {
         let pod = build(&sandbox(), &config()).unwrap();
         let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let by_name = |n: &str| vols.iter().find(|v| v.name == n).unwrap();
 
-        let home = by_name(VOL_HOME).host_path.as_ref().unwrap();
-        assert_eq!(home.path, "/msb");
-        assert_eq!(home.type_.as_deref(), Some("DirectoryOrCreate"));
+        // Per-pod writable home, not a node-shared hostPath.
+        let home = by_name(VOL_HOME);
+        assert!(home.empty_dir.is_some(), "home must be an emptyDir");
+        assert!(home.host_path.is_none(), "home must not be a hostPath");
 
-        // The cache is the pre-baked image, referenced by spec.image (ADR 0003).
+        // The cache is the pre-baked image, referenced by spec.image.
         let cache = by_name(VOL_CACHE).image.as_ref().unwrap();
         assert_eq!(cache.reference.as_deref(), Some("python:3.12"));
     }
