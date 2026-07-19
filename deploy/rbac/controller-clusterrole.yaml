@@ -37,3 +37,10 @@ rules:
   - get
   - create
   - patch
+- apiGroups:
+  - ''
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
