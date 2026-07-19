@@ -13,7 +13,9 @@ pub const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
 pub const FIELD_MANAGER: &str = "msb-controller";
 
 pub const CONFIG_MOUNT: &str = "/msb-config";
-pub const BIN_MOUNT: &str = "/msb-bin";
+/// The pre-baked cache image volume mounts here (ADR 0003). Must be
+/// `$MSB_HOME/cache` so the VMDK's baked absolute paths resolve.
+pub const CACHE_MOUNT: &str = "/msb/cache";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
