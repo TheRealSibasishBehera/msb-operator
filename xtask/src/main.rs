@@ -62,6 +62,9 @@ fn controller_policy_rules() -> Vec<PolicyRule> {
             &["leases"],
             &["get", "create", "patch"],
         ),
+        // Events: lifecycle Events on Sandboxes. The kube Recorder creates and
+        // patches Events.
+        rule(&[""], &["events"], &["create", "patch"]),
     ]
 }
 

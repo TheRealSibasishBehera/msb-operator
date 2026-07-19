@@ -17,6 +17,15 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.terminationReason
+      name: Reason
+      type: string
+    - jsonPath: .status.exitCode
+      name: Exit
+      type: integer
     - jsonPath: .status.nodeName
       name: Node
       type: string
@@ -226,6 +235,33 @@ spec:
           status:
             nullable: true
             properties:
+              conditions:
+                items:
+                  description: |-
+                    A status condition, mirroring `metav1.Condition`. schemars-derived because
+                    `k8s-openapi`'s `Condition` has no `JsonSchema` impl for the CRD schema.
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      description: PascalCase machine-readable reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`, `Failed`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
               exitCode:
                 format: int32
                 nullable: true

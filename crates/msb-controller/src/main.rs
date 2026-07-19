@@ -1,3 +1,4 @@
+mod conditions;
 mod config;
 mod controller;
 mod leader;
@@ -11,6 +12,7 @@ use clap::Parser;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::controller::Controller;
+use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::watcher;
 use kube::{Api, Client};
 use msb_crd::Sandbox;
@@ -94,6 +96,13 @@ async fn main() -> anyhow::Result<()> {
     info!(%config, holder = %holder_id, "starting controller");
 
     let client_for_lease = client.clone();
+    let recorder = Recorder::new(
+        client.clone(),
+        Reporter {
+            controller: "msb-controller".into(),
+            instance: Some(holder_id.clone()),
+        },
+    );
     let run_controller = || async move {
         Controller::new(sandboxes, watcher::Config::default())
             .owns(pods, watcher::Config::default())
@@ -101,7 +110,11 @@ async fn main() -> anyhow::Result<()> {
             .run(
                 controller::reconcile,
                 controller::error_policy,
-                Arc::new(Context { client, config }),
+                Arc::new(Context {
+                    client,
+                    config,
+                    recorder,
+                }),
             )
             .for_each(|res| async move {
                 match res {

@@ -4,13 +4,34 @@ use std::time::Duration;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
-use kube::{Api, Client, ResourceExt};
-use msb_crd::{Sandbox, SandboxPhase, SandboxStatus, TerminationReason};
+use kube::runtime::events::{Event, EventType, Recorder};
+use kube::{Api, Client, Resource, ResourceExt};
+use msb_crd::{Sandbox, SandboxCondition, SandboxPhase, SandboxStatus, TerminationReason};
 use serde_json::json;
 use tracing::{info, warn};
 
+use crate::conditions;
 use crate::config::{ControllerConfig, FIELD_MANAGER};
 use crate::pod::{self, PodBuildError};
+
+fn event(type_: EventType, reason: &str, note: &str) -> Event {
+    Event {
+        type_,
+        reason: reason.to_string(),
+        note: Some(note.to_string()),
+        // We don't distinguish action from reason for these lifecycle events.
+        action: reason.to_string(),
+        secondary: None,
+    }
+}
+
+fn prior_conditions(sandbox: &Sandbox) -> Vec<SandboxCondition> {
+    sandbox
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default()
+}
 
 /// Written by the daemon on sandbox exit; read at the `terminate` call site.
 pub const ANN_TERMINATION_REASON: &str = "microsandbox.io/termination-reason";
@@ -64,6 +85,7 @@ pub enum Error {
 pub struct Context {
     pub client: Client,
     pub config: ControllerConfig,
+    pub recorder: Recorder,
 }
 
 pub fn error_policy(sandbox: Arc<Sandbox>, error: &Error, _ctx: Arc<Context>) -> Action {
@@ -113,9 +135,9 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
     };
 
     match pod_phase(&existing) {
-        Some("Running") => mark_running(&sandbox, &sandboxes, &existing, &name).await,
+        Some("Running") => mark_running(&sandbox, &ctx, &sandboxes, &existing, &name).await,
         Some("Succeeded") | Some("Failed") => {
-            terminate(&sandbox, &sandboxes, &pods, &existing, &name).await
+            terminate(&sandbox, &ctx, &sandboxes, &pods, &existing, &name).await
         }
         _ => Ok(Action::requeue(REQUEUE_WHILE_PENDING)),
     }
@@ -151,6 +173,7 @@ async fn create_pod(
 
 async fn mark_running(
     sandbox: &Sandbox,
+    ctx: &Context,
     sandboxes: &Api<Sandbox>,
     pod: &Pod,
     name: &str,
@@ -159,21 +182,36 @@ async fn mark_running(
         return Ok(Action::await_change());
     }
 
+    let now = now_rfc3339();
+    let mut conditions = prior_conditions(sandbox);
+    conditions::set(
+        &mut conditions,
+        conditions::ready(true, "PodRunning", "sandbox pod is running", now.clone()),
+    );
     let status = SandboxStatus {
         phase: Some(SandboxPhase::Running),
         pod_name: Some(pod.name_any()),
         node_name: pod.spec.as_ref().and_then(|s| s.node_name.clone()),
-        started_at: Some(now_rfc3339()),
+        started_at: Some(now),
+        conditions,
         ..Default::default()
     };
 
     patch_status(sandboxes, name, &status).await?;
+    ctx.recorder
+        .publish(
+            &event(EventType::Normal, "Running", "sandbox pod is running"),
+            &sandbox.object_ref(&()),
+        )
+        .await
+        .ok();
     info!(sandbox = %name, "running");
     Ok(Action::await_change())
 }
 
 async fn terminate(
     sandbox: &Sandbox,
+    ctx: &Context,
     sandboxes: &Api<Sandbox>,
     pods: &Api<Pod>,
     pod: &Pod,
@@ -204,9 +242,20 @@ async fn terminate(
         .and_then(|s| s.terminated.as_ref())
         .map(|t| t.exit_code);
 
+    let succeeded = phase == SandboxPhase::Succeeded;
+    let reason_str = reason
+        .as_ref()
+        .map(|r| format!("{r:?}"))
+        .unwrap_or_else(|| "Unknown".to_string());
+
     // Carry forward the fields the Running phase set: a merge patch reads a
     // missing field as null-and-delete, so omitting these would wipe them.
     let prior = sandbox.status.as_ref();
+    let mut conditions = prior_conditions(sandbox);
+    conditions::set(
+        &mut conditions,
+        conditions::ready(false, &reason_str, "sandbox exited", now_rfc3339()),
+    );
     let status = SandboxStatus {
         phase: Some(phase.clone()),
         pod_name: Some(pod.name_any()),
@@ -215,8 +264,24 @@ async fn terminate(
         terminated_at: Some(terminated_at),
         termination_reason: reason.clone(),
         exit_code,
+        conditions,
     };
     patch_status(sandboxes, name, &status).await?;
+    ctx.recorder
+        .publish(
+            &event(
+                if succeeded {
+                    EventType::Normal
+                } else {
+                    EventType::Warning
+                },
+                if succeeded { "Succeeded" } else { "Failed" },
+                &format!("sandbox terminated: {reason_str}"),
+            ),
+            &sandbox.object_ref(&()),
+        )
+        .await
+        .ok();
 
     let pod_name = pod.name_any();
     if let Err(source) = pods.delete(&pod_name, &DeleteParams::default()).await
@@ -437,6 +502,7 @@ mod tests {
             terminated_at: Some("2026-07-17T10:05:00Z".to_string()),
             termination_reason: Some(TerminationReason::Completed),
             exit_code: Some(0),
+            ..Default::default()
         };
 
         assert_eq!(

@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
     status = "SandboxStatus",
     shortname = "sb",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].status"}"#,
+    printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.terminationReason"}"#,
+    printcolumn = r#"{"name":"Exit","type":"integer","jsonPath":".status.exitCode"}"#,
     printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
@@ -281,6 +284,25 @@ pub struct SandboxStatus {
     pub terminated_at: Option<String>,
     pub termination_reason: Option<TerminationReason>,
     pub exit_code: Option<i32>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<SandboxCondition>,
+}
+
+/// A status condition, mirroring `metav1.Condition`. schemars-derived because
+/// `k8s-openapi`'s `Condition` has no `JsonSchema` impl for the CRD schema.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxCondition {
+    /// e.g. `Ready`, `Failed`.
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// `True`, `False`, or `Unknown`.
+    pub status: String,
+    /// PascalCase machine-readable reason.
+    pub reason: String,
+    pub message: String,
+    pub last_transition_time: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
