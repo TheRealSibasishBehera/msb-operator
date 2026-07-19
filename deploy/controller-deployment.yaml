@@ -40,6 +40,10 @@ spec:
               value: ghcr.io/superradcompany/msb-runtime:latest
             - name: MSB_BRIDGE_IMAGE
               value: ghcr.io/superradcompany/msb-bridge:latest
+            # Registry/repo prefix for pre-baked cache images; the controller
+            # derives each sandbox's cache-image reference from spec.image here.
+            - name: MSB_CACHE_PREFIX
+              value: ghcr.io/superradcompany/msb-cache
             - name: RUST_LOG
               value: info
           securityContext:
