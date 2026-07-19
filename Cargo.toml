@@ -6,6 +6,7 @@ members = [
     "crates/msb-daemon",
     "crates/msb-prerunner",
     "crates/msb-bridge",
+    "crates/msb-runtime",
     "xtask",
 ]
 

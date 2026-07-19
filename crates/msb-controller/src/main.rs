@@ -24,8 +24,9 @@ use crate::controller::Context;
 #[derive(Parser)]
 #[command(name = "msb-controller", about = "microsandbox Sandbox controller")]
 struct Cli {
-    /// msb state directory on the node, mounted as a hostPath into sandbox pods.
-    #[arg(long, default_value = "/var/lib/msb", env = "MSB_HOME")]
+    /// msb home inside sandbox pods. Must be `/msb`: the cache's baked VMDK
+    /// holds absolute paths under `/msb/cache`, so build and runtime must match.
+    #[arg(long, default_value = "/msb", env = "MSB_HOME")]
     msb_home: String,
 
     /// GID of /dev/kvm on the node. Not standardised; Ubuntu assigns it dynamically.

@@ -2,14 +2,15 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, HostPathVolumeSource,
-    Pod, PodSecurityContext, PodSpec, ResourceRequirements, SecurityContext, Volume, VolumeMount,
+    ImageVolumeSource, Pod, PodSecurityContext, PodSpec, ResourceRequirements, SecurityContext,
+    Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Resource;
 use msb_crd::Sandbox;
 
-use crate::config::{BIN_MOUNT, CONFIG_MOUNT, ControllerConfig, KVM_RESOURCE, SANDBOX_LABEL};
+use crate::config::{CACHE_MOUNT, CONFIG_MOUNT, ControllerConfig, KVM_RESOURCE, SANDBOX_LABEL};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PodBuildError {
@@ -26,7 +27,7 @@ pub enum PodBuildError {
 
 const VOL_HOME: &str = "msb-home";
 const VOL_CONFIG: &str = "msb-config";
-const VOL_BIN: &str = "msb-bin";
+const VOL_CACHE: &str = "msb-cache";
 
 /// Sandbox pods run as this fixed non-root uid; `/root/.microsandbox` (msb's
 /// default home) is unreadable to it, which is why MSB_HOME is set explicitly.
@@ -34,6 +35,13 @@ const RUN_AS_USER: i64 = 1000;
 
 pub fn pod_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
+}
+
+/// msb's flat sandbox name (ADR 0002): `<namespace>__<name>`. `_` is forbidden
+/// in Kubernetes names but permitted by msb, so `__` is the only unambiguous
+/// separator. The >128-byte hashed fallback is not yet needed here.
+fn msb_sandbox_name(namespace: &str, name: &str) -> String {
+    format!("{namespace}__{name}")
 }
 
 /// Builds the sandbox Pod. Pure: no client, no I/O.
@@ -72,6 +80,8 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
             source,
         })?;
 
+    let flat_name = msb_sandbox_name(&namespace, &name);
+
     let labels = BTreeMap::from([
         (SANDBOX_LABEL.to_string(), "true".to_string()),
         ("microsandbox.io/sandbox-name".to_string(), name.clone()),
@@ -87,8 +97,11 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         },
         spec: Some(PodSpec {
             init_containers: Some(vec![prerunner_container(cfg, &spec_json)]),
-            containers: vec![runtime_container(cfg), bridge_container(cfg)],
-            volumes: Some(volumes(cfg)),
+            containers: vec![
+                runtime_container(cfg, &spec_json, &flat_name),
+                bridge_container(cfg),
+            ],
+            volumes: Some(volumes(cfg, &sandbox.spec.image)),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
                 run_as_user: Some(RUN_AS_USER),
@@ -113,18 +126,11 @@ fn prerunner_container(cfg: &ControllerConfig, spec_json: &str) -> Container {
             value: Some(spec_json.to_string()),
             ..Default::default()
         }]),
-        volume_mounts: Some(vec![
-            VolumeMount {
-                name: VOL_CONFIG.to_string(),
-                mount_path: CONFIG_MOUNT.to_string(),
-                ..Default::default()
-            },
-            VolumeMount {
-                name: VOL_BIN.to_string(),
-                mount_path: BIN_MOUNT.to_string(),
-                ..Default::default()
-            },
-        ]),
+        volume_mounts: Some(vec![VolumeMount {
+            name: VOL_CONFIG.to_string(),
+            mount_path: CONFIG_MOUNT.to_string(),
+            ..Default::default()
+        }]),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
             capabilities: Some(Capabilities {
@@ -137,19 +143,26 @@ fn prerunner_container(cfg: &ControllerConfig, spec_json: &str) -> Container {
     }
 }
 
-fn runtime_container(cfg: &ControllerConfig) -> Container {
+fn runtime_container(cfg: &ControllerConfig, spec_json: &str, flat_name: &str) -> Container {
     Container {
         name: "msb-runtime".to_string(),
         image: Some(cfg.runtime_image.clone()),
+        // The runtime binary reads the spec and flat name; msb + libkrunfw are
+        // baked into the image (ADR 0004), so no binary paths are passed here.
         env: Some(vec![
             EnvVar {
-                name: "MSB_HOME".to_string(),
-                value: Some(cfg.msb_home().to_string()),
+                name: "MSB_SANDBOX_SPEC".to_string(),
+                value: Some(spec_json.to_string()),
                 ..Default::default()
             },
             EnvVar {
-                name: "MSB_LIBKRUNFW_PATH".to_string(),
-                value: Some(format!("{BIN_MOUNT}/libkrunfw.so")),
+                name: "MSB_SANDBOX_NAME".to_string(),
+                value: Some(flat_name.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "MSB_HOME".to_string(),
+                value: Some(cfg.msb_home().to_string()),
                 ..Default::default()
             },
         ]),
@@ -165,9 +178,12 @@ fn runtime_container(cfg: &ControllerConfig) -> Container {
                 read_only: Some(true),
                 ..Default::default()
             },
+            // The pre-baked cache (ADR 0003), read-only: msb boots from it in
+            // place and never writes to cache/. Mounted at $MSB_HOME/cache so
+            // the VMDK's baked absolute paths resolve.
             VolumeMount {
-                name: VOL_BIN.to_string(),
-                mount_path: BIN_MOUNT.to_string(),
+                name: VOL_CACHE.to_string(),
+                mount_path: CACHE_MOUNT.to_string(),
                 read_only: Some(true),
                 ..Default::default()
             },
@@ -223,7 +239,7 @@ fn bridge_container(cfg: &ControllerConfig) -> Container {
     }
 }
 
-fn volumes(cfg: &ControllerConfig) -> Vec<Volume> {
+fn volumes(cfg: &ControllerConfig, image: &str) -> Vec<Volume> {
     vec![
         Volume {
             name: VOL_HOME.to_string(),
@@ -243,8 +259,13 @@ fn volumes(cfg: &ControllerConfig) -> Vec<Volume> {
             ..Default::default()
         },
         Volume {
-            name: VOL_BIN.to_string(),
-            empty_dir: Some(EmptyDirVolumeSource::default()),
+            name: VOL_CACHE.to_string(),
+            // spec.image is a pre-baked cache image (ADR 0003), pulled by the
+            // kubelet as a KEP-4639 image volume and booted in place.
+            image: Some(ImageVolumeSource {
+                reference: Some(image.to_string()),
+                pull_policy: Some("IfNotPresent".to_string()),
+            }),
             ..Default::default()
         },
     ]
@@ -283,7 +304,9 @@ pub(crate) mod test_support {
 
     pub fn config() -> ControllerConfig {
         ControllerConfig::new(
-            "/var/lib/msb",
+            // MSB_HOME must be /msb so the pre-baked cache's absolute VMDK paths
+            // resolve at $MSB_HOME/cache (ADR 0003).
+            "/msb",
             104,
             "ghcr.io/msb/prerunner:dev",
             "ghcr.io/msb/runtime:dev",
@@ -483,16 +506,24 @@ mod tests {
         let pod = build(&sandbox(), &config()).unwrap();
         assert_eq!(
             env_of(container(&pod, "msb-runtime"), "MSB_HOME"),
-            Some("/var/lib/msb".to_string())
+            Some("/msb".to_string())
         );
     }
 
     #[test]
-    fn points_libkrunfw_at_the_sideloaded_copy() {
+    fn passes_the_spec_and_flat_name_to_the_runtime() {
         let pod = build(&sandbox(), &config()).unwrap();
+        let rt = container(&pod, "msb-runtime");
+
+        let encoded = env_of(rt, "MSB_SANDBOX_SPEC").expect("spec env var");
+        let decoded: serde_json::Value =
+            serde_json::from_str(&encoded).expect("round-trips as JSON");
+        assert_eq!(decoded["image"], "python:3.12");
+        assert_eq!(decoded["cpus"], 2);
+
         assert_eq!(
-            env_of(container(&pod, "msb-runtime"), "MSB_LIBKRUNFW_PATH"),
-            Some("/msb-bin/libkrunfw.so".to_string())
+            env_of(rt, "MSB_SANDBOX_NAME"),
+            Some("team-a__my-sandbox".to_string())
         );
     }
 
@@ -508,25 +539,38 @@ mod tests {
     }
 
     #[test]
-    fn declares_the_three_volumes() {
+    fn declares_home_config_and_cache_volumes() {
         let pod = build(&sandbox(), &config()).unwrap();
         let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let names: Vec<_> = vols.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, vec![VOL_HOME, VOL_CONFIG, VOL_BIN]);
+        assert_eq!(names, vec![VOL_HOME, VOL_CONFIG, VOL_CACHE]);
     }
 
     #[test]
-    fn home_is_a_hostpath_and_binaries_are_not() {
+    fn home_is_a_hostpath_and_cache_is_an_image_volume() {
         let pod = build(&sandbox(), &config()).unwrap();
         let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let by_name = |n: &str| vols.iter().find(|v| v.name == n).unwrap();
 
         let home = by_name(VOL_HOME).host_path.as_ref().unwrap();
-        assert_eq!(home.path, "/var/lib/msb");
+        assert_eq!(home.path, "/msb");
         assert_eq!(home.type_.as_deref(), Some("DirectoryOrCreate"));
 
-        assert!(by_name(VOL_BIN).host_path.is_none());
-        assert!(by_name(VOL_BIN).empty_dir.is_some());
+        // The cache is the pre-baked image, referenced by spec.image (ADR 0003).
+        let cache = by_name(VOL_CACHE).image.as_ref().unwrap();
+        assert_eq!(cache.reference.as_deref(), Some("python:3.12"));
+    }
+
+    #[test]
+    fn runtime_mounts_the_cache_read_only_at_msb_home_cache() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let mounts = container(&pod, "msb-runtime")
+            .volume_mounts
+            .as_ref()
+            .unwrap();
+        let cache = mounts.iter().find(|m| m.name == VOL_CACHE).unwrap();
+        assert_eq!(cache.mount_path, "/msb/cache");
+        assert_eq!(cache.read_only, Some(true));
     }
 
     #[test]
@@ -573,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn prerunner_writes_config_and_binaries() {
+    fn prerunner_writes_only_config() {
         let pod = build(&sandbox(), &config()).unwrap();
         let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
         let mounts = init.volume_mounts.as_ref().unwrap();
@@ -581,6 +625,6 @@ mod tests {
             assert_ne!(m.read_only, Some(true), "prerunner must write {}", m.name);
         }
         let names: Vec<_> = mounts.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, vec![VOL_CONFIG, VOL_BIN]);
+        assert_eq!(names, vec![VOL_CONFIG]);
     }
 }

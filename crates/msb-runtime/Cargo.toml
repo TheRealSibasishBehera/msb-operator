@@ -1,0 +1,28 @@
+[package]
+name = "msb-runtime"
+description = "Runtime container: links the msb SDK and boots the sandbox."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+msb-crd = { path = "../msb-crd" }
+# Binary crate: selects the k8s-openapi API version for the whole graph (msb-crd
+# is a library and deliberately leaves the version feature unset).
+k8s-openapi = { version = "0.28", features = ["v1_32"], default-features = false }
+microsandbox = { version = "=0.6.6", default-features = false, features = ["net", "prebuilt"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "msb-runtime"
+path = "src/main.rs"
