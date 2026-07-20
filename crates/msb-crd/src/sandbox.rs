@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].status"}"#,
     printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.terminationReason"}"#,
     printcolumn = r#"{"name":"Exit","type":"integer","jsonPath":".status.exitCode"}"#,
+    printcolumn = r#"{"name":"Restarts","type":"integer","jsonPath":".status.restartCount"}"#,
     printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
@@ -299,6 +300,10 @@ pub enum RunPolicy {
 
 // --- Status ---
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxStatus {
@@ -312,6 +317,11 @@ pub struct SandboxStatus {
     pub terminated_at: Option<String>,
     pub termination_reason: Option<TerminationReason>,
     pub exit_code: Option<i32>,
+
+    /// Times the pod has been recreated under `runPolicy: RerunOnFailure`. Drives
+    /// the requeue backoff and is surfaced so users can see a sandbox is looping.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub restart_count: u32,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<SandboxCondition>,

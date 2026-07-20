@@ -6,7 +6,9 @@ use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::{Api, Client, Resource, ResourceExt};
-use msb_crd::{Sandbox, SandboxCondition, SandboxPhase, SandboxStatus, TerminationReason};
+use msb_crd::{
+    RunPolicy, Sandbox, SandboxCondition, SandboxPhase, SandboxStatus, TerminationReason,
+};
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -39,6 +41,15 @@ pub const ANN_TERMINATION_REASON: &str = "microsandbox.io/termination-reason";
 pub const ANN_TERMINATED_AT: &str = "microsandbox.io/terminated-at";
 
 const REQUEUE_WHILE_PENDING: Duration = Duration::from_secs(5);
+
+/// Backoff before recreating a pod on `RerunOnFailure`. kube-rs backs off only on
+/// reconcile *errors*; a retry after a clean success-path exit is not an error, so
+/// we pace it ourselves — capped exponential in the restart count.
+fn retry_backoff(restart_count: u32) -> Duration {
+    const CAP: u64 = 300;
+    let secs = 5u64.saturating_mul(1u64 << restart_count.min(6));
+    Duration::from_secs(secs.min(CAP))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -140,8 +151,22 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         if is_terminal(&sandbox) {
             return finish(&sandbox, &sandboxes, &name).await;
         }
+        // A pod that was Running and is now gone vanished uncleanly — node loss,
+        // eviction, or an external delete. It never reached a terminal phase we
+        // could read a reason from, so treat the disappearance itself as the
+        // unclean exit and route it through the same runPolicy decision.
+        if was_running(&sandbox) {
+            return handle_vanished_pod(&sandbox, &ctx, &sandboxes, &name).await;
+        }
         return create_pod(&sandbox, &ctx, &pods, &name).await;
     };
+
+    // A pod we already asked to delete (e.g. a retry in flight) still reports its
+    // terminal phase until it's gone. Acting on it again would double-count the
+    // restart; wait for it to disappear instead.
+    if existing.metadata.deletion_timestamp.is_some() {
+        return Ok(Action::requeue(REQUEUE_WHILE_PENDING));
+    }
 
     match pod_phase(&existing) {
         Some("Running") => mark_running(&sandbox, &ctx, &sandboxes, &existing, &name).await,
@@ -229,6 +254,8 @@ async fn mark_running(
         service_name,
         node_name: pod.spec.as_ref().and_then(|s| s.node_name.clone()),
         started_at: Some(now),
+        // Preserve the retry count across the Pending→Running transition.
+        restart_count: sandbox.status.as_ref().map(|s| s.restart_count).unwrap_or(0),
         conditions,
         ..Default::default()
     };
@@ -286,24 +313,48 @@ async fn terminate(
         .map(|r| format!("{r:?}"))
         .unwrap_or_else(|| "Unknown".to_string());
 
-    // Carry forward the fields the Running phase set: a merge patch reads a
-    // missing field as null-and-delete, so omitting these would wipe them.
+    // An unclean exit under RerunOnFailure is retried: reset to Pending with a
+    // fresh pod rather than resting terminal. The msb sandbox name is reused, but
+    // MSB_HOME is a per-pod emptyDir, so the new pod boots against a clean home
+    // with no prior DB row or dir — no SandboxAlreadyExists, no upper to preserve.
     let prior = sandbox.status.as_ref();
+    let retrying = !succeeded && sandbox.spec.run_policy == RunPolicy::RerunOnFailure;
+    let restart_count = prior.map(|s| s.restart_count).unwrap_or(0);
+
     let mut conditions = prior_conditions(sandbox);
     conditions::set(
         &mut conditions,
         conditions::ready(false, &reason_str, "sandbox exited", now_rfc3339()),
     );
-    let status = SandboxStatus {
-        phase: Some(phase.clone()),
-        pod_name: Some(pod.name_any()),
-        service_name: prior.and_then(|s| s.service_name.clone()),
-        node_name: prior.and_then(|s| s.node_name.clone()),
-        started_at: prior.and_then(|s| s.started_at.clone()),
-        terminated_at: Some(terminated_at),
-        termination_reason: reason.clone(),
-        exit_code,
-        conditions,
+
+    // Carry forward the fields the Running phase set: a merge patch reads a
+    // missing field as null-and-delete, so omitting these would wipe them.
+    let status = if retrying {
+        SandboxStatus {
+            phase: Some(SandboxPhase::Pending),
+            pod_name: None,
+            service_name: prior.and_then(|s| s.service_name.clone()),
+            node_name: prior.and_then(|s| s.node_name.clone()),
+            started_at: None,
+            terminated_at: Some(terminated_at),
+            termination_reason: reason.clone(),
+            exit_code,
+            restart_count: restart_count + 1,
+            conditions,
+        }
+    } else {
+        SandboxStatus {
+            phase: Some(phase.clone()),
+            pod_name: Some(pod.name_any()),
+            service_name: prior.and_then(|s| s.service_name.clone()),
+            node_name: prior.and_then(|s| s.node_name.clone()),
+            started_at: prior.and_then(|s| s.started_at.clone()),
+            terminated_at: Some(terminated_at),
+            termination_reason: reason.clone(),
+            exit_code,
+            restart_count,
+            conditions,
+        }
     };
     patch_status(sandboxes, name, &status).await?;
     ctx.recorder
@@ -333,8 +384,77 @@ async fn terminate(
         });
     }
 
+    if retrying {
+        let backoff = retry_backoff(restart_count);
+        info!(sandbox = %name, ?reason, restart = restart_count + 1, ?backoff, "retrying");
+        // Wait for the pod delete to propagate, then a fresh reconcile recreates
+        // it: no pod + non-terminal Pending routes back to create_pod.
+        return Ok(Action::requeue(backoff));
+    }
+
     info!(sandbox = %name, ?phase, ?reason, "terminated");
     finish(sandbox, sandboxes, name).await
+}
+
+/// A Running pod disappeared. Record it as a `NodeLost` unclean exit, then apply
+/// the same runPolicy decision as a Failed exit: retry under `RerunOnFailure`,
+/// otherwise settle terminal `Failed`.
+async fn handle_vanished_pod(
+    sandbox: &Sandbox,
+    ctx: &Context,
+    sandboxes: &Api<Sandbox>,
+    name: &str,
+) -> Result<Action, Error> {
+    let prior = sandbox.status.as_ref();
+    let retrying = sandbox.spec.run_policy == RunPolicy::RerunOnFailure;
+    let restart_count = prior.map(|s| s.restart_count).unwrap_or(0);
+    let reason = TerminationReason::NodeLost;
+
+    let mut conditions = prior_conditions(sandbox);
+    conditions::set(
+        &mut conditions,
+        conditions::ready(false, "NodeLost", "sandbox pod disappeared", now_rfc3339()),
+    );
+
+    let status = SandboxStatus {
+        phase: Some(if retrying {
+            SandboxPhase::Pending
+        } else {
+            SandboxPhase::Failed
+        }),
+        pod_name: if retrying { None } else { prior.and_then(|s| s.pod_name.clone()) },
+        service_name: prior.and_then(|s| s.service_name.clone()),
+        node_name: prior.and_then(|s| s.node_name.clone()),
+        started_at: if retrying { None } else { prior.and_then(|s| s.started_at.clone()) },
+        terminated_at: Some(now_rfc3339()),
+        termination_reason: Some(reason),
+        exit_code: None,
+        restart_count: if retrying { restart_count + 1 } else { restart_count },
+        conditions,
+    };
+    patch_status(sandboxes, name, &status).await?;
+    ctx.recorder
+        .publish(
+            &event(EventType::Warning, "NodeLost", "sandbox pod disappeared"),
+            &sandbox.object_ref(&()),
+        )
+        .await
+        .ok();
+
+    if retrying {
+        let backoff = retry_backoff(restart_count);
+        info!(sandbox = %name, restart = restart_count + 1, ?backoff, "retrying after pod loss");
+        return Ok(Action::requeue(backoff));
+    }
+
+    warn!(sandbox = %name, "pod lost; runPolicy is Once, settling Failed");
+    finish(sandbox, sandboxes, name).await
+}
+
+/// True if the sandbox's last recorded phase was `Running` — used to tell a
+/// pod that vanished mid-run from one not yet created.
+fn was_running(sandbox: &Sandbox) -> bool {
+    sandbox.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&SandboxPhase::Running)
 }
 
 async fn finish(sandbox: &Sandbox, sandboxes: &Api<Sandbox>, name: &str) -> Result<Action, Error> {
@@ -628,6 +748,46 @@ mod tests {
             Some("2026-07-17T10:00:00Z")
         );
         assert_eq!(terminated.node_name.as_deref(), Some("node-1"));
+    }
+
+    #[test]
+    fn retry_backoff_grows_then_caps() {
+        // Exponential from 5s, capped at 300s so a flapping sandbox doesn't spin.
+        assert_eq!(retry_backoff(0), Duration::from_secs(5));
+        assert_eq!(retry_backoff(1), Duration::from_secs(10));
+        assert_eq!(retry_backoff(3), Duration::from_secs(40));
+        assert_eq!(retry_backoff(6), Duration::from_secs(300));
+        assert_eq!(retry_backoff(100), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn rerun_on_failure_retries_only_unclean_exits() {
+        use msb_crd::RunPolicy;
+        let retries = |policy: RunPolicy, succeeded: bool| {
+            !succeeded && policy == RunPolicy::RerunOnFailure
+        };
+        assert!(retries(RunPolicy::RerunOnFailure, false), "unclean + policy");
+        assert!(!retries(RunPolicy::RerunOnFailure, true), "clean exit stops");
+        assert!(!retries(RunPolicy::Once, false), "Once never retries");
+        assert!(!retries(RunPolicy::Once, true));
+    }
+
+    #[test]
+    fn was_running_reads_the_recorded_phase() {
+        let mut sb = sandbox();
+        assert!(!was_running(&sb), "no status");
+        for (phase, expected) in [
+            (SandboxPhase::Pending, false),
+            (SandboxPhase::Running, true),
+            (SandboxPhase::Succeeded, false),
+            (SandboxPhase::Failed, false),
+        ] {
+            sb.status = Some(SandboxStatus {
+                phase: Some(phase.clone()),
+                ..Default::default()
+            });
+            assert_eq!(was_running(&sb), expected, "{phase:?}");
+        }
     }
 
     #[test]
