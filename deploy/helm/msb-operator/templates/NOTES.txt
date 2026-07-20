@@ -1,0 +1,36 @@
+msb-operator {{ .Chart.AppVersion }} installed into namespace {{ .Release.Namespace }}.
+
+Components:
+  - msb-controller  Deployment ({{ .Values.controller.replicas }} replicas, leader-elected)
+  - msb-daemon      DaemonSet  (KVM device plugin, one per node)
+{{- if .Values.installCRD }}
+  - Sandbox CRD     sandboxes.sandbox.microsandbox.io
+{{- end }}
+
+Check rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/msb-controller
+  kubectl -n {{ .Release.Namespace }} get ds msb-daemon
+  kubectl get node -o jsonpath='{.items[*].status.allocatable.devices\.microsandbox\.io/kvm}'
+
+Create a sandbox:
+  cat <<EOF | kubectl apply -f -
+  apiVersion: sandbox.microsandbox.io/v1alpha1
+  kind: Sandbox
+  metadata:
+    name: hello
+  spec:
+    image: alpine:3.20
+    cpus: 1
+    memory: 512
+    cmd: ["echo", "hello from a microVM"]
+    runPolicy: Once
+  EOF
+
+  kubectl get sandbox hello -w
+
+{{- if not .Values.kvmGid }}
+
+WARNING: kvmGid was not set. The controller needs the GID of /dev/kvm on your
+nodes. Find it with `stat -c '%g' /dev/kvm` on a node and reinstall with
+`--set kvmGid=<gid>`.
+{{- end }}

@@ -1,0 +1,29 @@
+{{- if .Values.rbac.aggregatedRoles }}
+# Tenant-facing roles for binding users/groups to Sandbox access. These grant
+# access to the Sandbox CRD only — never to the operator's own Pods/Services or
+# to Secrets. Bind them per-namespace with a RoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-operator
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["sandbox.microsandbox.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["sandbox.microsandbox.io"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-viewer
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["sandbox.microsandbox.io"]
+    resources: ["sandboxes", "sandboxes/status"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

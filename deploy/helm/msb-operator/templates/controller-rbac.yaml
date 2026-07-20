@@ -1,0 +1,57 @@
+{{- if .Values.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "msb-operator.controller.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+# Controller permissions. Each rule maps to a concrete Api call in the
+# controller; nothing here grants Secret access — referenced Secrets are mounted
+# as read-only volumes the kubelet reads, so sandbox pods need no Secret RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "msb-operator.controller.serviceAccountName" . }}
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["sandbox.microsandbox.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["sandbox.microsandbox.io"]
+    resources: ["sandboxes/status"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "msb-operator.controller.serviceAccountName" . }}
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "msb-operator.controller.serviceAccountName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "msb-operator.controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

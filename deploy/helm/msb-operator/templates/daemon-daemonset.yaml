@@ -1,0 +1,67 @@
+{{- $reg := .Values.registry -}}
+{{- $ver := .Chart.AppVersion -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: msb-daemon
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "msb-operator.daemon.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "msb-operator.daemon.selectorLabels" . | nindent 8 }}
+    spec:
+      priorityClassName: system-node-critical
+      hostPID: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: msb-daemon
+          image: {{ include "msb-operator.image" (dict "registry" $reg "repo" .Values.daemon.image "tag" .Values.daemon.tag "defaultTag" $ver) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: ["msb-daemon", "device-plugin", "--kvm-path", {{ .Values.daemon.kvmPath | quote }}]
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.daemon.logLevel | quote }}
+          resources:
+            {{- toYaml .Values.daemon.resources | nindent 12 }}
+          volumeMounts:
+            - name: device-plugin-dir
+              mountPath: /var/lib/kubelet/device-plugins
+            # Only /dev/kvm is needed. Mounting the whole /dev read-only blocks
+            # kubelet from creating /dev/termination-log inside the container.
+            - name: kvm
+              mountPath: {{ .Values.daemon.kvmPath | quote }}
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # Root is needed to bind the device-plugin socket under
+            # /var/lib/kubelet; it only reads /dev/kvm, and drops all caps.
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: device-plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+        - name: kvm
+          hostPath:
+            path: {{ .Values.daemon.kvmPath | quote }}
+            type: CharDevice
+      {{- with .Values.daemon.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemon.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

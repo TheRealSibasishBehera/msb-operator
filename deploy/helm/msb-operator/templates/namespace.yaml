@@ -1,0 +1,18 @@
+{{- if .Values.createNamespace }}
+# The operator namespace runs `enforce: privileged`. The controller itself is
+# restricted-clean (drops all caps, no hostPath), but the msb-daemon device
+# plugin must mount hostPath (/var/lib/kubelet, /dev) and run as root to bind the
+# kubelet socket — legitimate node-infrastructure access that `restricted` and
+# `baseline` both forbid. Sandbox *workload* namespaces are separate and run
+# `enforce: baseline` (see docs).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: privileged
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-10"
+{{- end }}
