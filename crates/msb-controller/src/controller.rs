@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
@@ -13,6 +13,7 @@ use tracing::{info, warn};
 use crate::conditions;
 use crate::config::{ControllerConfig, FIELD_MANAGER};
 use crate::pod::{self, PodBuildError};
+use crate::service;
 
 fn event(type_: EventType, reason: &str, note: &str) -> Event {
     Event {
@@ -52,6 +53,14 @@ pub enum Error {
     ApplyPod {
         sandbox: String,
         pod: String,
+        #[source]
+        source: kube::Error,
+    },
+
+    #[error("applying service {service} for sandbox {sandbox}: {source}")]
+    ApplyService {
+        sandbox: String,
+        service: String,
         #[source]
         source: kube::Error,
     },
@@ -149,6 +158,11 @@ async fn create_pod(
     pods: &Api<Pod>,
     name: &str,
 ) -> Result<Action, Error> {
+    let namespace = sandbox.namespace().ok_or_else(|| Error::MissingObjectKey {
+        sandbox: name.to_string(),
+        key: "namespace",
+    })?;
+
     let desired = pod::build(sandbox, &ctx.config).map_err(|source| Error::BuildPod {
         sandbox: name.to_string(),
         source,
@@ -167,7 +181,25 @@ async fn create_pod(
         source,
     })?;
 
-    info!(sandbox = %name, pod = %pod_name, "created sandbox pod");
+    // The per-sandbox Service fronts the bridge. Owner-ref'd to the Sandbox, so
+    // it is GC'd on delete; server-side apply makes recreate idempotent.
+    let svc = service::build(sandbox, &ctx.config, name, &namespace);
+    let svc_name = svc.name_any();
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), &namespace);
+    services
+        .patch(
+            &svc_name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Apply(&svc),
+        )
+        .await
+        .map_err(|source| Error::ApplyService {
+            sandbox: name.to_string(),
+            service: svc_name.clone(),
+            source,
+        })?;
+
+    info!(sandbox = %name, pod = %pod_name, service = %svc_name, "created sandbox pod + service");
     Ok(Action::requeue(REQUEUE_WHILE_PENDING))
 }
 
@@ -188,9 +220,13 @@ async fn mark_running(
         &mut conditions,
         conditions::ready(true, "PodRunning", "sandbox pod is running", now.clone()),
     );
+    let service_name = sandbox
+        .namespace()
+        .map(|ns| service::service_name(&ns, name));
     let status = SandboxStatus {
         phase: Some(SandboxPhase::Running),
         pod_name: Some(pod.name_any()),
+        service_name,
         node_name: pod.spec.as_ref().and_then(|s| s.node_name.clone()),
         started_at: Some(now),
         conditions,
@@ -261,6 +297,7 @@ async fn terminate(
     let status = SandboxStatus {
         phase: Some(phase.clone()),
         pod_name: Some(pod.name_any()),
+        service_name: prior.and_then(|s| s.service_name.clone()),
         node_name: prior.and_then(|s| s.node_name.clone()),
         started_at: prior.and_then(|s| s.started_at.clone()),
         terminated_at: Some(terminated_at),

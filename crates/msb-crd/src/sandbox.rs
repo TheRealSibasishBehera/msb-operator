@@ -304,6 +304,9 @@ pub enum RunPolicy {
 pub struct SandboxStatus {
     pub phase: Option<SandboxPhase>,
     pub pod_name: Option<String>,
+    /// Name of the per-sandbox ClusterIP Service. Hashed, so not guessable —
+    /// clients read it here to reach the sandbox's bridge.
+    pub service_name: Option<String>,
     pub node_name: Option<String>,
     pub started_at: Option<String>,
     pub terminated_at: Option<String>,

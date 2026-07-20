@@ -3,6 +3,7 @@ mod config;
 mod controller;
 mod leader;
 mod pod;
+mod service;
 
 use std::sync::Arc;
 use std::time::Duration;

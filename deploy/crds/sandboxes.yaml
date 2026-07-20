@@ -281,6 +281,12 @@ spec:
               podName:
                 nullable: true
                 type: string
+              serviceName:
+                description: |-
+                  Name of the per-sandbox ClusterIP Service. Hashed, so not guessable —
+                  clients read it here to reach the sandbox's bridge.
+                nullable: true
+                type: string
               startedAt:
                 nullable: true
                 type: string
