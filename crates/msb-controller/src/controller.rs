@@ -217,11 +217,13 @@ async fn terminate(
     pod: &Pod,
     name: &str,
 ) -> Result<Action, Error> {
-    // Read before delete: the annotation is gone once the pod is GC'd.
+    // Prefer an explicit annotation if one is ever present; otherwise derive the
+    // reason from Pod status. Read before delete — the pod is GC'd below.
     let reason = pod
         .annotations()
         .get(ANN_TERMINATION_REASON)
-        .and_then(|r| parse_termination_reason(r));
+        .and_then(|r| parse_termination_reason(r))
+        .or_else(|| reason_from_pod(pod));
     let terminated_at = pod
         .annotations()
         .get(ANN_TERMINATED_AT)
@@ -342,6 +344,31 @@ fn parse_termination_reason(value: &str) -> Option<TerminationReason> {
     serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
 }
 
+/// Termination reason from Pod status: the runtime container's terminated reason
+/// (`OOMKilled`/`Completed`/`Error`) and exit code, plus a pod-level `Evicted`.
+fn reason_from_pod(pod: &Pod) -> Option<TerminationReason> {
+    // Pod-level eviction is surfaced as the phase reason, above container state.
+    if pod.status.as_ref().and_then(|s| s.reason.as_deref()) == Some("Evicted") {
+        return Some(TerminationReason::Evicted);
+    }
+
+    let terminated = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.name == "msb-runtime"))
+        .and_then(|c| c.state.as_ref())
+        .and_then(|s| s.terminated.as_ref())?;
+
+    match terminated.reason.as_deref() {
+        Some("OOMKilled") => Some(TerminationReason::OomKilled),
+        Some("Completed") if terminated.exit_code == 0 => Some(TerminationReason::Completed),
+        // "Error", "ContainerCannotRun", a non-zero "Completed", or anything else.
+        _ if terminated.exit_code == 0 => Some(TerminationReason::Completed),
+        _ => Some(TerminationReason::Failed),
+    }
+}
+
 fn is_terminal(sandbox: &Sandbox) -> bool {
     matches!(
         sandbox.status.as_ref().and_then(|s| s.phase.as_ref()),
@@ -382,10 +409,64 @@ mod tests {
         }
     }
 
+    /// A pod whose msb-runtime container terminated with the given k8s reason
+    /// and exit code.
+    fn pod_terminated(reason: Option<&str>, exit_code: i32) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                phase: Some("Failed".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "msb-runtime".to_string(),
+                    state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code,
+                            reason: reason.map(String::from),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn reads_phase_from_pod_status() {
         assert_eq!(pod_phase(&pod_with_phase("Running")), Some("Running"));
         assert_eq!(pod_phase(&Pod::default()), None);
+    }
+
+    #[test]
+    fn derives_oomkilled_from_container_reason() {
+        let pod = pod_terminated(Some("OOMKilled"), 137);
+        assert_eq!(reason_from_pod(&pod), Some(TerminationReason::OomKilled));
+    }
+
+    #[test]
+    fn derives_completed_on_clean_exit() {
+        let pod = pod_terminated(Some("Completed"), 0);
+        assert_eq!(reason_from_pod(&pod), Some(TerminationReason::Completed));
+    }
+
+    #[test]
+    fn derives_failed_on_error_exit() {
+        let pod = pod_terminated(Some("Error"), 1);
+        assert_eq!(reason_from_pod(&pod), Some(TerminationReason::Failed));
+    }
+
+    #[test]
+    fn derives_evicted_from_pod_reason() {
+        let mut pod = pod_terminated(None, 0);
+        pod.status.as_mut().unwrap().reason = Some("Evicted".to_string());
+        assert_eq!(reason_from_pod(&pod), Some(TerminationReason::Evicted));
+    }
+
+    #[test]
+    fn no_terminated_container_yields_none() {
+        assert_eq!(reason_from_pod(&pod_with_phase("Running")), None);
     }
 
     #[test]
