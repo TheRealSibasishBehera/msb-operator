@@ -1,10 +1,12 @@
 {{- if .Values.createNamespace }}
-# The operator namespace runs `enforce: privileged`. The controller itself is
-# restricted-clean (drops all caps, no hostPath), but the msb-daemon device
-# plugin must mount hostPath (/var/lib/kubelet, /dev) and run as root to bind the
-# kubelet socket — legitimate node-infrastructure access that `restricted` and
-# `baseline` both forbid. Sandbox *workload* namespaces are separate and run
-# `enforce: baseline` (see docs).
+# The operator namespace runs `enforce: privileged`. The msb-daemon device
+# plugin mounts hostPath (/var/lib/kubelet/device-plugins, /dev/kvm) to bind the
+# kubelet socket and read the device — and hostPath is forbidden by BOTH
+# `restricted` and `baseline`; only `privileged` permits it. This matches
+# KubeVirt (virt-handler) and Virtink (virt-daemon), which require the same.
+# Our daemon is still hardened relative to theirs (no privileged:true, drops all
+# caps, read-only rootfs, mounts only /dev/kvm read-only), but the namespace
+# level is dictated by the hostPath mount, not by the container's own hardening.
 apiVersion: v1
 kind: Namespace
 metadata:
