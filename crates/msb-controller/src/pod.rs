@@ -120,7 +120,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
                     sandbox.spec.cpus,
                     sandbox.spec.memory,
                 ),
-                bridge_container(cfg),
+                bridge_container(cfg, &flat_name),
             ],
             volumes: Some(volumes(&cfg.cache_ref(&sandbox.spec.image), &sandbox.spec)),
             security_context: Some(PodSecurityContext {
@@ -283,10 +283,28 @@ fn runtime_resources(cpus: u32, memory_mib: u32) -> ResourceRequirements {
     }
 }
 
-fn bridge_container(cfg: &ControllerConfig) -> Container {
+fn bridge_container(cfg: &ControllerConfig, flat_name: &str) -> Container {
     Container {
         name: "msb-bridge".to_string(),
         image: Some(cfg.bridge_image.clone()),
+        // The bridge locates the relay socket under $MSB_HOME/run from the name.
+        env: Some(vec![
+            EnvVar {
+                name: "MSB_SANDBOX_NAME".to_string(),
+                value: Some(flat_name.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "MSB_HOME".to_string(),
+                value: Some(cfg.msb_home().to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "MSB_BRIDGE_PORT".to_string(),
+                value: Some(cfg.bridge_port.to_string()),
+                ..Default::default()
+            },
+        ]),
         ports: Some(vec![ContainerPort {
             name: Some("agent".to_string()),
             container_port: cfg.bridge_port,
@@ -909,6 +927,17 @@ mod tests {
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].container_port, 7000);
         assert_eq!(ports[0].name.as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn bridge_gets_the_sandbox_name_to_find_the_socket() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let bridge = container(&pod, "msb-bridge");
+        assert_eq!(
+            env_of(bridge, "MSB_SANDBOX_NAME").as_deref(),
+            Some("team-a__my-sandbox")
+        );
+        assert_eq!(env_of(bridge, "MSB_HOME").as_deref(), Some("/msb"));
     }
 
     #[test]
