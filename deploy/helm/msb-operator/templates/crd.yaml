@@ -1,0 +1,335 @@
+{{- if .Values.installCRD }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    "helm.sh/resource-policy": keep
+  name: sandboxes.sandbox.microsandbox.io
+spec:
+  group: sandbox.microsandbox.io
+  names:
+    categories: []
+    kind: Sandbox
+    plural: sandboxes
+    shortNames:
+    - sb
+    singular: sandbox
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.terminationReason
+      name: Reason
+      type: string
+    - jsonPath: .status.exitCode
+      name: Exit
+      type: integer
+    - jsonPath: .status.restartCount
+      name: Restarts
+      type: integer
+    - jsonPath: .status.nodeName
+      name: Node
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for SandboxSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              cmd:
+                description: Command to run inside the guest. Defaults to the image entrypoint.
+                items:
+                  type: string
+                type: array
+              cpus:
+                default: 1
+                description: Number of vCPUs.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              ephemeral:
+                default: false
+                description: Whether to delete the Sandbox CRD after the sandbox exits.
+                type: boolean
+              image:
+                description: OCI image for the guest root filesystem.
+                type: string
+              memory:
+                default: 512
+                description: Memory in MiB.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              network:
+                default:
+                  dns:
+                    queryTimeoutMs: 5000
+                    rebindProtection: true
+                  enabled: true
+                  maxConnections: 256
+                  policy:
+                    preset: publicOnly
+                  tls:
+                    intercept: false
+                  trustHostCas: false
+                description: Network configuration.
+                properties:
+                  dns:
+                    default:
+                      queryTimeoutMs: 5000
+                      rebindProtection: true
+                    properties:
+                      nameservers:
+                        items:
+                          type: string
+                        type: array
+                      queryTimeoutMs:
+                        default: 5000
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      rebindProtection:
+                        default: true
+                        type: boolean
+                    type: object
+                  enabled:
+                    default: true
+                    description: Disable the smoltcp proxy entirely.
+                    type: boolean
+                  maxConnections:
+                    default: 256
+                    description: Maximum concurrent guest TCP connections.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  policy:
+                    default:
+                      preset: publicOnly
+                    properties:
+                      preset:
+                        default: publicOnly
+                        enum:
+                        - publicOnly
+                        - allowAll
+                        - denyAll
+                        - nonLocal
+                        type: string
+                    type: object
+                  publishedPorts:
+                    description: Guest ports to expose on the Pod IP.
+                    items:
+                      properties:
+                        containerPort:
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          type: integer
+                        protocol:
+                          default: TCP
+                          enum:
+                          - TCP
+                          - UDP
+                          type: string
+                      required:
+                      - containerPort
+                      type: object
+                    type: array
+                  tls:
+                    default:
+                      intercept: false
+                    properties:
+                      intercept:
+                        default: false
+                        type: boolean
+                      interceptedPorts:
+                        items:
+                          properties:
+                            port:
+                              format: uint16
+                              maximum: 65535.0
+                              minimum: 0.0
+                              type: integer
+                          required:
+                          - port
+                          type: object
+                        type: array
+                    type: object
+                  trustHostCas:
+                    default: false
+                    description: Copy host trusted CAs into the guest.
+                    type: boolean
+                type: object
+              runPolicy:
+                default: Once
+                description: Restart policy on failure.
+                enum:
+                - Once
+                - RerunOnFailure
+                type: string
+              secrets:
+                description: Secrets injected as env vars inside the guest via the smoltcp proxy.
+                items:
+                  properties:
+                    allowedHosts:
+                      description: Hosts the proxy is permitted to substitute this value to.
+                      items:
+                        type: string
+                      type: array
+                    env:
+                      description: Environment variable name the guest sees (set to the placeholder value).
+                      type: string
+                    valueFrom:
+                      description: Source of the secret value.
+                      properties:
+                        secretKeyRef:
+                          properties:
+                            key:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - secretKeyRef
+                      type: object
+                  required:
+                  - env
+                  - valueFrom
+                  type: object
+                type: array
+              upper:
+                default:
+                  size: 4Gi
+                description: Writable overlay layer configuration.
+                properties:
+                  size:
+                    default: 4Gi
+                    description: Writable overlay size as a Kubernetes resource.Quantity string (e.g. "4Gi").
+                    type: string
+                type: object
+              volumes:
+                description: Named volumes (node-local in V1).
+                items:
+                  properties:
+                    mountPath:
+                      type: string
+                    name:
+                      type: string
+                    size:
+                      description: Volume size as a Kubernetes resource.Quantity string (e.g. "10Gi").
+                      type: string
+                  required:
+                  - mountPath
+                  - name
+                  - size
+                  type: object
+                type: array
+            required:
+            - image
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: |-
+                    A status condition, mirroring `metav1.Condition`. schemars-derived because
+                    `k8s-openapi`'s `Condition` has no `JsonSchema` impl for the CRD schema.
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      description: PascalCase machine-readable reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`, `Failed`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              exitCode:
+                format: int32
+                nullable: true
+                type: integer
+              nodeName:
+                nullable: true
+                type: string
+              phase:
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - null
+                nullable: true
+                type: string
+              podName:
+                nullable: true
+                type: string
+              restartCount:
+                description: |-
+                  Times the pod has been recreated under `runPolicy: RerunOnFailure`. Drives
+                  the requeue backoff and is surfaced so users can see a sandbox is looping.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              serviceName:
+                description: |-
+                  Name of the per-sandbox ClusterIP Service. Hashed, so not guessable —
+                  clients read it here to reach the sandbox's bridge.
+                nullable: true
+                type: string
+              startedAt:
+                nullable: true
+                type: string
+              terminatedAt:
+                nullable: true
+                type: string
+              terminationReason:
+                description: Termination reason sourced from the daemon annotation or inferred by the controller.
+                enum:
+                - Completed
+                - MaxDurationExceeded
+                - IdleTimeout
+                - ShutdownRequested
+                - Failed
+                - OOMKilled
+                - Evicted
+                - NodeLost
+                - null
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Sandbox
+        type: object
+        x-kubernetes-validations:
+        - message: Sandbox spec is immutable after creation
+          rule: self.spec == oldSelf.spec
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

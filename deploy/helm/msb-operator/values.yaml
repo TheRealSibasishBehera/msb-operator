@@ -1,0 +1,100 @@
+# Default values for msb-operator.
+
+# -- Container registry for all operator and sandbox-workload images.
+registry: ghcr.io/superradcompany
+
+# -- Image pull policy applied to the controller and daemon.
+imagePullPolicy: IfNotPresent
+
+# -- Image pull secrets, referenced by name, for a private registry.
+imagePullSecrets: []
+
+# GID of /dev/kvm on the nodes. REQUIRED and node-dependent: Ubuntu 24.04
+# assigns it dynamically, so there is no safe default. Find it with
+# `stat -c '%g' /dev/kvm` on a node, and pin it with a udev rule
+# (KERNEL=="kvm", GROUP="kvm", MODE="0660") so it is stable across reboots.
+# -- GID of /dev/kvm on the nodes (required; `helm install --set kvmGid=<gid>`).
+kvmGid: ""
+
+# msb home inside sandbox pods. Must be /msb: the cache's baked VMDK holds
+# absolute paths under /msb/cache, so build and runtime must match.
+# -- msb home path inside sandbox pods (must be /msb).
+msbHome: /msb
+
+# -- TCP port the bridge sidecar and its per-sandbox Service listen on.
+bridgePort: 7000
+
+controller:
+  # -- Controller image repository (appended to `registry`).
+  image: msb-controller
+  # -- Controller image tag (defaults to the chart appVersion).
+  tag: ""
+  # -- Replicas. Two gives one active reconciler and one warm standby (leader election).
+  replicas: 2
+  # -- Leader-election lease lifetime, seconds. A standby acquires after this elapses without a renewal.
+  leaseTtlSeconds: 15
+  # -- Controller log level (RUST_LOG).
+  logLevel: info
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+daemon:
+  # -- Device-plugin daemon image repository (appended to `registry`).
+  image: msb-daemon
+  # -- Device-plugin daemon image tag (defaults to the chart appVersion).
+  tag: ""
+  # -- Path to the KVM device node the daemon watches.
+  kvmPath: /dev/kvm
+  # -- Daemon log level (RUST_LOG).
+  logLevel: info
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  # Runs on every KVM-capable node; tolerate everything by default.
+  # -- Daemon scheduling tolerations (defaults to tolerate all taints).
+  tolerations:
+    - operator: Exists
+  # -- Restrict the daemon to nodes matching these labels (e.g. a kvm=true label).
+  nodeSelector: {}
+
+# Sidecar and workload images the controller stamps onto sandbox pods. Their
+# tags default to the chart appVersion; override to pin independently.
+sandbox:
+  runtimeImage: msb-runtime
+  bridgeImage: msb-bridge
+  prerunnerImage: msb-prerunner
+  runtimeTag: ""
+  bridgeTag: ""
+  prerunnerTag: ""
+  # Registry/repo prefix for pre-baked cache images. The controller derives each
+  # sandbox's cache-image reference from spec.image under this prefix. Defaults
+  # to `<registry>/msb-cache` when empty.
+  # -- Prefix for pre-baked cache images (defaults to `<registry>/msb-cache`).
+  cachePrefix: ""
+
+# Let the chart create its own namespace, labelled `enforce: privileged` (the
+# daemon needs host access). Leave false when the namespace is pre-created — but
+# then ensure it is NOT `enforce: restricted`, or the daemon pod is rejected.
+# -- Create the operator namespace with a privileged Pod Security label.
+createNamespace: false
+
+# Install the Sandbox CRD with the chart. Set false if the CRD is managed
+# out-of-band (e.g. applied separately in a GitOps flow).
+# -- Install the Sandbox CRD as part of the release.
+installCRD: true
+
+rbac:
+  # -- Create the controller ClusterRole/Binding and ServiceAccount.
+  create: true
+  # -- Create the aggregated sandbox-operator / sandbox-viewer tenant ClusterRoles.
+  aggregatedRoles: true
