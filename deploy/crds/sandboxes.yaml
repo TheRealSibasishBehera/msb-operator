@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.exitCode
       name: Exit
       type: integer
+    - jsonPath: .status.restartCount
+      name: Restarts
+      type: integer
     - jsonPath: .status.nodeName
       name: Node
       type: string
@@ -281,6 +284,13 @@ spec:
               podName:
                 nullable: true
                 type: string
+              restartCount:
+                description: |-
+                  Times the pod has been recreated under `runPolicy: RerunOnFailure`. Drives
+                  the requeue backoff and is surfaced so users can see a sandbox is looping.
+                format: uint32
+                minimum: 0.0
+                type: integer
               serviceName:
                 description: |-
                   Name of the per-sandbox ClusterIP Service. Hashed, so not guessable —
