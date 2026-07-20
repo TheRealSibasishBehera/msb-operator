@@ -82,9 +82,11 @@ sandbox:
   # -- Prefix for pre-baked cache images (defaults to `<registry>/msb-cache`).
   cachePrefix: ""
 
-# Let the chart create its own namespace, labelled `enforce: privileged` (the
-# daemon needs host access). Leave false when the namespace is pre-created — but
-# then ensure it is NOT `enforce: restricted`, or the daemon pod is rejected.
+# Let the chart create its own namespace, labelled `enforce: privileged`. The
+# daemon mounts hostPath (device-plugin socket + /dev/kvm), which both
+# `restricted` and `baseline` forbid — only `privileged` permits it, same as
+# KubeVirt and Virtink. Leave false when the namespace is pre-created — but then
+# it must permit hostPath (privileged), or the daemon pod is rejected.
 # -- Create the operator namespace with a privileged Pod Security label.
 createNamespace: false
 
