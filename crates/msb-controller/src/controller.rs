@@ -168,6 +168,14 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         return Ok(Action::requeue(REQUEUE_WHILE_PENDING));
     }
 
+    // The runtime container is the VMM's parent: when it exits, the sandbox is
+    // over even if the bridge sidecar keeps running. A Never-restart pod with a
+    // still-running sidecar stays phase Running, so keying off the pod phase alone
+    // would miss the sandbox's death — terminate on the runtime's exit directly.
+    if runtime_terminated(&existing) {
+        return terminate(&sandbox, &ctx, &sandboxes, &pods, &existing, &name).await;
+    }
+
     match pod_phase(&existing) {
         Some("Running") => mark_running(&sandbox, &ctx, &sandboxes, &existing, &name).await,
         Some("Succeeded") | Some("Failed") => {
@@ -175,6 +183,31 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         }
         _ => Ok(Action::requeue(REQUEUE_WHILE_PENDING)),
     }
+}
+
+/// The `msb-runtime` container's terminated state, if it has exited. The runtime
+/// is the VMM's parent, so this is the authoritative signal for the sandbox's own
+/// lifecycle — independent of the bridge sidecar and the pod's overall phase.
+fn runtime_terminated_state(
+    pod: &Pod,
+) -> Option<&k8s_openapi::api::core::v1::ContainerStateTerminated> {
+    pod.status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.name == "msb-runtime"))
+        .and_then(|c| c.state.as_ref())
+        .and_then(|s| s.terminated.as_ref())
+}
+
+/// True once the `msb-runtime` container has terminated — the signal that the
+/// sandbox itself has ended, regardless of the pod's overall phase.
+fn runtime_terminated(pod: &Pod) -> bool {
+    runtime_terminated_state(pod).is_some()
+}
+
+/// The runtime container's exit code, if it has terminated.
+fn runtime_exit_code(pod: &Pod) -> Option<i32> {
+    runtime_terminated_state(pod).map(|t| t.exit_code)
 }
 
 async fn create_pod(
@@ -293,19 +326,20 @@ async fn terminate(
         .cloned()
         .unwrap_or_else(now_rfc3339);
 
-    let phase = match pod_phase(pod) {
-        Some("Succeeded") => SandboxPhase::Succeeded,
-        _ => SandboxPhase::Failed,
+    // Derive success from the runtime container's exit, not the pod phase: the
+    // pod can still be Running (bridge sidecar alive) when the runtime has exited.
+    // Fall back to the pod phase only if the runtime's exit code is unavailable.
+    let runtime_exit = runtime_exit_code(pod);
+    let phase = match runtime_exit {
+        Some(0) => SandboxPhase::Succeeded,
+        Some(_) => SandboxPhase::Failed,
+        None => match pod_phase(pod) {
+            Some("Succeeded") => SandboxPhase::Succeeded,
+            _ => SandboxPhase::Failed,
+        },
     };
 
-    let exit_code = pod
-        .status
-        .as_ref()
-        .and_then(|s| s.container_statuses.as_ref())
-        .and_then(|cs| cs.iter().find(|c| c.name == "msb-runtime"))
-        .and_then(|c| c.state.as_ref())
-        .and_then(|s| s.terminated.as_ref())
-        .map(|t| t.exit_code);
+    let exit_code = runtime_exit;
 
     let succeeded = phase == SandboxPhase::Succeeded;
     let reason_str = reason
@@ -509,13 +543,7 @@ fn reason_from_pod(pod: &Pod) -> Option<TerminationReason> {
         return Some(TerminationReason::Evicted);
     }
 
-    let terminated = pod
-        .status
-        .as_ref()
-        .and_then(|s| s.container_statuses.as_ref())
-        .and_then(|cs| cs.iter().find(|c| c.name == "msb-runtime"))
-        .and_then(|c| c.state.as_ref())
-        .and_then(|s| s.terminated.as_ref())?;
+    let terminated = runtime_terminated_state(pod)?;
 
     match terminated.reason.as_deref() {
         Some("OOMKilled") => Some(TerminationReason::OomKilled),
@@ -588,6 +616,64 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    /// A pod still phase Running (bridge sidecar alive) whose msb-runtime has
+    /// terminated with the given exit code — the case that keying off pod phase
+    /// alone would miss.
+    fn pod_running_but_runtime_dead(exit_code: i32) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![
+                    ContainerStatus {
+                        name: "msb-bridge".to_string(),
+                        state: Some(ContainerState {
+                            running: Some(Default::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ContainerStatus {
+                        name: "msb-runtime".to_string(),
+                        state: Some(ContainerState {
+                            terminated: Some(ContainerStateTerminated {
+                                exit_code,
+                                reason: Some(if exit_code == 0 { "Completed" } else { "Error" }.into()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn runtime_death_is_detected_while_pod_still_running() {
+        // The bug this guards: a Never-restart pod stays phase Running while the
+        // bridge sidecar lives, so the runtime's exit must be read directly.
+        let pod = pod_running_but_runtime_dead(1);
+        assert_eq!(pod_phase(&pod), Some("Running"), "pod is still Running");
+        assert!(runtime_terminated(&pod), "runtime exit must be seen anyway");
+        assert_eq!(runtime_exit_code(&pod), Some(1));
+
+        // A live sandbox: runtime running, nothing terminated.
+        let live = pod_with_phase("Running");
+        assert!(!runtime_terminated(&live));
+        assert_eq!(runtime_exit_code(&live), None);
+    }
+
+    #[test]
+    fn clean_runtime_exit_is_succeeded_even_if_pod_reads_running() {
+        // phase derived from the runtime exit code, not the (still Running) pod.
+        let pod = pod_running_but_runtime_dead(0);
+        assert_eq!(runtime_exit_code(&pod), Some(0));
+        assert_eq!(reason_from_pod(&pod), Some(TerminationReason::Completed));
     }
 
     #[test]
