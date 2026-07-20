@@ -1,5 +1,5 @@
-//! The msb-runtime container: links the msb SDK, boots the sandbox with
-//! `Sandbox::create`, and blocks on `wait()` for the guest's lifetime.
+//! The msb-runtime container: links the msb SDK, boots the sandbox, supervises
+//! it until it stops, and exits with its status.
 //!
 //! It must not detach. Under Kubernetes, when this entrypoint exits containerd
 //! tears down the container cgroup and kills the VMM with it, so the runtime
@@ -83,7 +83,9 @@ async fn main() -> Result<()> {
         .memory(spec.memory);
 
     if !spec.cmd.is_empty() {
-        builder = builder.initial_command(spec.cmd.clone());
+        // Ties the VM's lifetime to the command (it stops when the command
+        // exits); `initial_command` would instead leave the VM up for exec.
+        builder = builder.persistent_initial_command(spec.cmd.clone());
     }
 
     // Apply the network policy and secret substitution; without this the guest
@@ -103,10 +105,23 @@ async fn main() -> Result<()> {
         .context("create: booting the sandbox")?;
     info!(sandbox = %cli.sandbox_name, "sandbox booted; supervising until it exits");
 
-    let status = sandbox
-        .wait()
+    let stop = sandbox
+        .wait_until_stopped()
         .await
         .context("wait: supervising the sandbox")?;
-    info!(sandbox = %cli.sandbox_name, ?status, "sandbox exited");
-    Ok(())
+    info!(
+        sandbox = %cli.sandbox_name,
+        exit_code = ?stop.exit_code,
+        signal = ?stop.signal,
+        "sandbox exited"
+    );
+
+    // Exit with the sandbox's status so the container's exit reflects it; the
+    // controller reads phase/reason from Pod status. Signal maps to 128+signal.
+    let code = match (stop.exit_code, stop.signal) {
+        (_, Some(sig)) => 128 + sig,
+        (Some(c), None) => c,
+        (None, None) => 0,
+    };
+    std::process::exit(code);
 }
