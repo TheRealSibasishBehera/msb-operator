@@ -54,6 +54,9 @@ fn controller_policy_rules() -> Vec<PolicyRule> {
             &["pods"],
             &["get", "list", "watch", "create", "patch", "delete"],
         ),
+        // Services: the per-sandbox ClusterIP fronting the bridge, applied via
+        // SSA. Owner-ref'd to the Sandbox, so GC handles deletion.
+        rule(&[""], &["services"], &["get", "create", "patch"]),
         // Leases: leader election. kube-leader-election creates the Lease once
         // then renews/acquires/steps-down via server-side apply (PATCH), so
         // `patch` is required, not `update`.
