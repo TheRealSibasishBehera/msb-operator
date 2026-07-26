@@ -34,9 +34,6 @@ struct Cli {
     #[arg(long, env = "MSB_KVM_GID")]
     kvm_gid: i64,
 
-    #[arg(long, env = "MSB_PRERUNNER_IMAGE")]
-    prerunner_image: String,
-
     #[arg(long, env = "MSB_RUNTIME_IMAGE")]
     runtime_image: String,
 
@@ -72,7 +69,6 @@ async fn main() -> anyhow::Result<()> {
     let config = ControllerConfig::new(
         cli.msb_home,
         cli.kvm_gid,
-        cli.prerunner_image,
         cli.runtime_image,
         cli.bridge_image,
         cli.bridge_port,

@@ -100,9 +100,9 @@ pub struct SecretKeyRef {
     pub key: String,
 }
 
-/// A secret the prerunner has resolved to plaintext, handed to the runtime over
-/// the shared config volume. Not part of the CRD — the on-disk contract between
-/// the two containers. `value` is plaintext and must stay on the tmpfs mount.
+/// A secret resolved to plaintext for the runtime. Not part of the CRD — the
+/// runtime reads the kubelet-mounted Secret volumes and builds these in memory.
+/// `value` is plaintext and is never written anywhere.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedSecret {

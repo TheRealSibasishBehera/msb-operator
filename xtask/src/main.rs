@@ -24,8 +24,8 @@ fn main() -> Result<()> {
 ///
 /// This list is the source of truth for controller RBAC. Each rule maps to a
 /// concrete `Api` call in `msb-controller`; review the two together. Nothing
-/// grants Secret access — resolving secrets is the prerunner's job under a
-/// namespace-scoped Role (provisioned separately).
+/// grants Secret access — the kubelet mounts referenced Secrets and the runtime
+/// reads them from the volume, so no operator Secret RBAC is needed.
 fn controller_policy_rules() -> Vec<PolicyRule> {
     let rule = |api_groups: &[&str], resources: &[&str], verbs: &[&str]| PolicyRule {
         api_groups: Some(api_groups.iter().map(|s| s.to_string()).collect()),

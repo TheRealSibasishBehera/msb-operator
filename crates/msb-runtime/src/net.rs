@@ -1,5 +1,5 @@
-//! Maps the CRD's network spec and the prerunner's resolved secrets onto the
-//! SDK network builder. Without this the sandbox boots with no policy and no
+//! Maps the CRD's network spec and the resolved secrets onto the SDK network
+//! builder. Without this the sandbox boots with no policy and no
 //! secret substitution — the SDK applies nothing we don't set here.
 
 use microsandbox::NetworkPolicy;

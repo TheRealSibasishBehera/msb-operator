@@ -4,7 +4,6 @@ members = [
     "crates/msb-crd",
     "crates/msb-controller",
     "crates/msb-daemon",
-    "crates/msb-prerunner",
     "crates/msb-bridge",
     "crates/msb-contract",
     "crates/msb-gateway",

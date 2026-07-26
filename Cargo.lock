@@ -3054,21 +3054,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "msb-prerunner"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "k8s-openapi",
- "msb-crd",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "msb-runtime"
 version = "0.1.0"
 dependencies = [
@@ -3078,6 +3063,7 @@ dependencies = [
  "microsandbox",
  "msb-crd",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

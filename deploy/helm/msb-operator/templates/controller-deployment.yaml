@@ -49,8 +49,6 @@ spec:
               value: {{ include "msb-operator.image" (dict "registry" $reg "repo" .Values.sandbox.runtimeImage "tag" .Values.sandbox.runtimeTag "defaultTag" $ver) }}
             - name: MSB_BRIDGE_IMAGE
               value: {{ include "msb-operator.image" (dict "registry" $reg "repo" .Values.sandbox.bridgeImage "tag" .Values.sandbox.bridgeTag "defaultTag" $ver) }}
-            - name: MSB_PRERUNNER_IMAGE
-              value: {{ include "msb-operator.image" (dict "registry" $reg "repo" .Values.sandbox.prerunnerImage "tag" .Values.sandbox.prerunnerTag "defaultTag" $ver) }}
             - name: MSB_CACHE_PREFIX
               value: {{ .Values.sandbox.cachePrefix | default (printf "%s/msb-cache" $reg) | quote }}
             - name: RUST_LOG
