@@ -1,0 +1,19 @@
+# Empty table opts this crate out of the parent workspace: it depends on the real
+# published microsandbox SDK, whose microsandbox-types must not tangle with the
+# workspace's own pin. Keep the pin below equal to the workspace pin.
+[workspace]
+
+[package]
+name = "msb-sdk-gateway-e2e"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "sdk-gateway-e2e"
+path = "src/main.rs"
+
+[dependencies]
+microsandbox = "=0.6.6"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
