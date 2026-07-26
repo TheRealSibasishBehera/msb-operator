@@ -1,0 +1,11 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # The per-sandbox ClusterIP Service exists and its name is published on status.
+  - script: |
+      svc=$(kubectl get sandbox e2e-boot -n $NAMESPACE -o jsonpath='{.status.serviceName}')
+      if [ -z "$svc" ]; then echo "FAIL: status.serviceName not set"; exit 1; fi
+      if ! kubectl get svc "$svc" -n $NAMESPACE >/dev/null 2>&1; then
+        echo "FAIL: Service $svc not found"; exit 1
+      fi
+      echo "PASS: Service $svc exists and is published on status"

@@ -1,0 +1,6 @@
+apiVersion: sandbox.microsandbox.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-once
+status:
+  phase: Running

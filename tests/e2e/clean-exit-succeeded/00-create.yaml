@@ -1,0 +1,12 @@
+apiVersion: sandbox.microsandbox.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-clean
+spec:
+  image: "alpine:3.20"
+  cpus: 1
+  memory: 512
+  # A short command that exits cleanly, so the sandbox runs to completion.
+  cmd: ["sh", "-c", "echo done"]
+  ephemeral: false
+  runPolicy: Once
