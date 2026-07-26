@@ -110,10 +110,8 @@ gateway:
 sandbox:
   runtimeImage: msb-runtime
   bridgeImage: msb-bridge
-  prerunnerImage: msb-prerunner
   runtimeTag: ""
   bridgeTag: ""
-  prerunnerTag: ""
   # Registry/repo prefix for pre-baked cache images. The controller derives each
   # sandbox's cache-image reference from spec.image under this prefix. Defaults
   # to `<registry>/msb-cache` when empty.

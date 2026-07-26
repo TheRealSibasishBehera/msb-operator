@@ -1,8 +1,8 @@
-//! Resolving `spec.secrets[]` into plaintext `ResolvedSecret`s for the runtime.
+//! Resolving `spec.secrets[]` into plaintext `ResolvedSecret`s.
 //!
 //! The guest's env var holds a *placeholder*, never the real value; msb's proxy
 //! swaps placeholder → value in outbound traffic to `allowed_hosts`. The
-//! plaintext lives only in the resolved file on the tmpfs and in msb's memory.
+//! plaintext lives only in msb's memory — never written anywhere.
 
 use std::collections::BTreeMap;
 

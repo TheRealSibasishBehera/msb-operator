@@ -34,8 +34,6 @@ spec:
             # GID of /dev/kvm on the nodes; node-dependent, set at install time.
             - name: MSB_KVM_GID
               value: "104"
-            - name: MSB_PRERUNNER_IMAGE
-              value: ghcr.io/superradcompany/msb-prerunner:latest
             - name: MSB_RUNTIME_IMAGE
               value: ghcr.io/superradcompany/msb-runtime:latest
             - name: MSB_BRIDGE_IMAGE

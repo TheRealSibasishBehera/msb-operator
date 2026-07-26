@@ -11,8 +11,8 @@ use kube::Resource;
 use msb_crd::{Sandbox, SandboxSpec};
 
 use crate::config::{
-    CACHE_MOUNT, CONFIG_MOUNT, CPU_ALLOCATION_RATIO, ControllerConfig, EPHEMERAL_STORAGE_MIB,
-    KVM_RESOURCE, SANDBOX_LABEL, memory_overhead_mib,
+    CACHE_MOUNT, CPU_ALLOCATION_RATIO, ControllerConfig, EPHEMERAL_STORAGE_MIB, KVM_RESOURCE,
+    SANDBOX_LABEL, memory_overhead_mib,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -29,12 +29,11 @@ pub enum PodBuildError {
 }
 
 const VOL_HOME: &str = "msb-home";
-const VOL_CONFIG: &str = "msb-config";
 const VOL_CACHE: &str = "msb-cache";
 
-/// Referenced Secrets mount read-only here, one dir per Secret; the prerunner
-/// reads `<SECRETS_MOUNT>/<secretName>/<key>`. The kubelet does the read, so the
-/// pod needs no Secret RBAC.
+/// Referenced Secrets mount read-only here, one dir per Secret; the runtime reads
+/// `<SECRETS_MOUNT>/<secretName>/<key>`. The kubelet does the read, so the pod
+/// needs no Secret RBAC.
 const SECRETS_MOUNT: &str = "/msb-secrets";
 
 /// Sandbox pods run as this fixed non-root uid; `/root/.microsandbox` (msb's
@@ -111,17 +110,15 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
             ..Default::default()
         },
         spec: Some(PodSpec {
-            init_containers: Some(vec![prerunner_container(cfg, &spec_json, &sandbox.spec)]),
-            containers: vec![
-                runtime_container(
-                    cfg,
-                    &spec_json,
-                    &flat_name,
-                    sandbox.spec.cpus,
-                    sandbox.spec.memory,
-                ),
-                bridge_container(cfg, &flat_name),
-            ],
+            // The bridge is a native sidecar, so it lives in init_containers but
+            // stays up for the pod's life and is ready in parallel with the boot.
+            init_containers: Some(vec![bridge_container(cfg, &flat_name)]),
+            containers: vec![runtime_container(
+                cfg,
+                &spec_json,
+                &flat_name,
+                &sandbox.spec,
+            )],
             volumes: Some(volumes(&cfg.cache_ref(&sandbox.spec.image), &sandbox.spec)),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
@@ -144,14 +141,28 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
     })
 }
 
-fn prerunner_container(cfg: &ControllerConfig, spec_json: &str, spec: &SandboxSpec) -> Container {
-    // The config volume it writes to, plus one read-only mount per referenced
-    // Secret for it to read.
-    let mut mounts = vec![VolumeMount {
-        name: VOL_CONFIG.to_string(),
-        mount_path: CONFIG_MOUNT.to_string(),
-        ..Default::default()
-    }];
+fn runtime_container(
+    cfg: &ControllerConfig,
+    spec_json: &str,
+    flat_name: &str,
+    spec: &SandboxSpec,
+) -> Container {
+    let mut mounts = vec![
+        VolumeMount {
+            name: VOL_HOME.to_string(),
+            mount_path: cfg.msb_home().to_string(),
+            ..Default::default()
+        },
+        // msb boots from the cache in place and never writes to it. Mounted
+        // at $MSB_HOME/cache so the VMDK's baked absolute paths resolve.
+        VolumeMount {
+            name: VOL_CACHE.to_string(),
+            mount_path: CACHE_MOUNT.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        },
+    ];
+    // The runtime resolves secrets in-process from these mounts — no init container.
     for secret_name in referenced_secret_names(spec) {
         mounts.push(VolumeMount {
             name: secret_vol_name(&secret_name),
@@ -161,38 +172,6 @@ fn prerunner_container(cfg: &ControllerConfig, spec_json: &str, spec: &SandboxSp
         });
     }
 
-    Container {
-        name: "msb-prerunner".to_string(),
-        image: Some(cfg.prerunner_image.clone()),
-        // Reads secret plaintext from the mounted Secret volumes and writes the
-        // resolved secrets to the shared config volume for the runtime.
-        env: Some(vec![EnvVar {
-            name: "MSB_SANDBOX_SPEC".to_string(),
-            value: Some(spec_json.to_string()),
-            ..Default::default()
-        }]),
-        volume_mounts: Some(mounts),
-        security_context: Some(SecurityContext {
-            allow_privilege_escalation: Some(false),
-            // Writes only to its mounted volumes, never the container rootfs.
-            read_only_root_filesystem: Some(true),
-            capabilities: Some(Capabilities {
-                drop: Some(vec!["ALL".to_string()]),
-                add: None,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-fn runtime_container(
-    cfg: &ControllerConfig,
-    spec_json: &str,
-    flat_name: &str,
-    cpus: u32,
-    memory_mib: u32,
-) -> Container {
     Container {
         name: "msb-runtime".to_string(),
         image: Some(cfg.runtime_image.clone()),
@@ -215,28 +194,8 @@ fn runtime_container(
                 ..Default::default()
             },
         ]),
-        volume_mounts: Some(vec![
-            VolumeMount {
-                name: VOL_HOME.to_string(),
-                mount_path: cfg.msb_home().to_string(),
-                ..Default::default()
-            },
-            VolumeMount {
-                name: VOL_CONFIG.to_string(),
-                mount_path: CONFIG_MOUNT.to_string(),
-                read_only: Some(true),
-                ..Default::default()
-            },
-            // msb boots from the cache in place and never writes to it. Mounted
-            // at $MSB_HOME/cache so the VMDK's baked absolute paths resolve.
-            VolumeMount {
-                name: VOL_CACHE.to_string(),
-                mount_path: CACHE_MOUNT.to_string(),
-                read_only: Some(true),
-                ..Default::default()
-            },
-        ]),
-        resources: Some(runtime_resources(cpus, memory_mib)),
+        volume_mounts: Some(mounts),
+        resources: Some(runtime_resources(spec.cpus, spec.memory)),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
             capabilities: Some(Capabilities {
@@ -287,6 +246,8 @@ fn bridge_container(cfg: &ControllerConfig, flat_name: &str) -> Container {
     Container {
         name: "msb-bridge".to_string(),
         image: Some(cfg.bridge_image.clone()),
+        // restartPolicy: Always on an init container makes it a native sidecar.
+        restart_policy: Some("Always".to_string()),
         // The bridge locates the relay socket under $MSB_HOME/run from the name.
         env: Some(vec![
             EnvVar {
@@ -363,15 +324,6 @@ fn volumes(cache_ref: &str, spec: &SandboxSpec) -> Vec<Volume> {
             // state off the node and invisible to other pods. The shared cache is
             // a separate read-only image volume.
             empty_dir: Some(EmptyDirVolumeSource::default()),
-            ..Default::default()
-        },
-        Volume {
-            name: VOL_CONFIG.to_string(),
-            // tmpfs: holds fully-resolved secret values, keep them off node disk.
-            empty_dir: Some(EmptyDirVolumeSource {
-                medium: Some("Memory".to_string()),
-                ..Default::default()
-            }),
             ..Default::default()
         },
         Volume {
@@ -479,7 +431,6 @@ pub(crate) mod test_support {
             // MSB_HOME must be /msb so the cache's absolute VMDK paths resolve.
             "/msb",
             104,
-            "ghcr.io/msb/prerunner:dev",
             "ghcr.io/msb/runtime:dev",
             "ghcr.io/msb/bridge:dev",
             7000,
@@ -553,19 +504,6 @@ mod tests {
         let pod = build(&sandbox(), &config()).unwrap();
         let labels = pod.metadata.labels.as_ref().unwrap();
         assert_eq!(labels.get(SANDBOX_LABEL).map(String::as_str), Some("true"));
-    }
-
-    #[test]
-    fn has_prerunner_init_container_and_two_containers() {
-        let pod = build(&sandbox(), &config()).unwrap();
-        let spec = pod.spec.as_ref().unwrap();
-
-        let inits = spec.init_containers.as_ref().unwrap();
-        assert_eq!(inits.len(), 1);
-        assert_eq!(inits[0].name, "msb-prerunner");
-
-        let names: Vec<_> = spec.containers.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["msb-runtime", "msb-bridge"]);
     }
 
     #[test]
@@ -668,19 +606,17 @@ mod tests {
     }
 
     #[test]
-    fn sidecars_use_a_read_only_root_filesystem() {
+    fn bridge_uses_a_read_only_root_filesystem() {
         let pod = build(&sandbox(), &config()).unwrap();
-        for name in ["msb-prerunner", "msb-bridge"] {
-            let c = container_or_init(&pod, name);
-            assert_eq!(
-                c.security_context
-                    .as_ref()
-                    .unwrap()
-                    .read_only_root_filesystem,
-                Some(true),
-                "{name} should have a read-only rootfs"
-            );
-        }
+        let c = container_or_init(&pod, "msb-bridge");
+        assert_eq!(
+            c.security_context
+                .as_ref()
+                .unwrap()
+                .read_only_root_filesystem,
+            Some(true),
+            "the bridge should have a read-only rootfs"
+        );
     }
 
     #[test]
@@ -783,10 +719,10 @@ mod tests {
     }
 
     #[test]
-    fn passes_the_spec_to_the_prerunner() {
+    fn passes_the_spec_to_the_runtime() {
         let pod = build(&sandbox(), &config()).unwrap();
-        let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
-        let encoded = env_of(init, "MSB_SANDBOX_SPEC").expect("spec env var");
+        let encoded =
+            env_of(container(&pod, "msb-runtime"), "MSB_SANDBOX_SPEC").expect("spec env var");
         let decoded: serde_json::Value =
             serde_json::from_str(&encoded).expect("round-trips as JSON");
         assert_eq!(decoded["image"], "python:3.12");
@@ -828,10 +764,12 @@ mod tests {
     }
 
     #[test]
-    fn prerunner_mounts_each_secret_read_only_under_msb_secrets() {
+    fn runtime_mounts_each_secret_read_only_under_msb_secrets() {
         let pod = build(&sandbox_with_secrets(), &config()).unwrap();
-        let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
-        let mounts = init.volume_mounts.as_ref().unwrap();
+        let mounts = container(&pod, "msb-runtime")
+            .volume_mounts
+            .as_ref()
+            .unwrap();
         for (name, path) in [
             ("secret-creds", "/msb-secrets/creds"),
             ("secret-db", "/msb-secrets/db"),
@@ -860,11 +798,11 @@ mod tests {
     }
 
     #[test]
-    fn declares_home_config_and_cache_volumes() {
+    fn declares_home_and_cache_volumes() {
         let pod = build(&sandbox(), &config()).unwrap();
         let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let names: Vec<_> = vols.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, vec![VOL_HOME, VOL_CONFIG, VOL_CACHE]);
+        assert_eq!(names, vec![VOL_HOME, VOL_CACHE]);
     }
 
     #[test]
@@ -910,20 +848,12 @@ mod tests {
     }
 
     #[test]
-    fn resolved_secrets_land_on_tmpfs_not_node_disk() {
-        let pod = build(&sandbox(), &config()).unwrap();
-        let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
-        let config_vol = vols.iter().find(|v| v.name == VOL_CONFIG).unwrap();
-        assert_eq!(
-            config_vol.empty_dir.as_ref().unwrap().medium.as_deref(),
-            Some("Memory")
-        );
-    }
-
-    #[test]
     fn bridge_exposes_the_configured_port() {
         let pod = build(&sandbox(), &config()).unwrap();
-        let ports = container(&pod, "msb-bridge").ports.as_ref().unwrap();
+        let ports = container_or_init(&pod, "msb-bridge")
+            .ports
+            .as_ref()
+            .unwrap();
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].container_port, 7000);
         assert_eq!(ports[0].name.as_deref(), Some("agent"));
@@ -932,7 +862,7 @@ mod tests {
     #[test]
     fn bridge_gets_the_sandbox_name_to_find_the_socket() {
         let pod = build(&sandbox(), &config()).unwrap();
-        let bridge = container(&pod, "msb-bridge");
+        let bridge = container_or_init(&pod, "msb-bridge");
         assert_eq!(
             env_of(bridge, "MSB_SANDBOX_NAME").as_deref(),
             Some("team-a__my-sandbox")
@@ -943,7 +873,7 @@ mod tests {
     #[test]
     fn bridge_gets_the_home_read_only() {
         let pod = build(&sandbox(), &config()).unwrap();
-        let mounts = container(&pod, "msb-bridge")
+        let mounts = container_or_init(&pod, "msb-bridge")
             .volume_mounts
             .as_ref()
             .unwrap();
@@ -964,14 +894,14 @@ mod tests {
     }
 
     #[test]
-    fn prerunner_writes_only_config() {
+    fn bridge_is_a_native_sidecar() {
         let pod = build(&sandbox(), &config()).unwrap();
-        let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
-        let mounts = init.volume_mounts.as_ref().unwrap();
-        for m in mounts {
-            assert_ne!(m.read_only, Some(true), "prerunner must write {}", m.name);
-        }
-        let names: Vec<_> = mounts.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, vec![VOL_CONFIG]);
+        let spec = pod.spec.as_ref().unwrap();
+        let inits = spec.init_containers.as_ref().unwrap();
+        assert_eq!(inits.len(), 1, "only the bridge sidecar");
+        assert_eq!(inits[0].name, "msb-bridge");
+        assert_eq!(inits[0].restart_policy.as_deref(), Some("Always"));
+        let names: Vec<_> = spec.containers.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["msb-runtime"]);
     }
 }

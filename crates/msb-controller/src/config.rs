@@ -12,7 +12,6 @@ pub const KVM_RESOURCE: &str = "devices.microsandbox.io/kvm";
 pub const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
 pub const FIELD_MANAGER: &str = "msb-controller";
 
-pub const CONFIG_MOUNT: &str = "/msb-config";
 /// Must be `$MSB_HOME/cache` so the cache's baked absolute VMDK paths resolve.
 pub const CACHE_MOUNT: &str = "/msb/cache";
 
@@ -51,7 +50,6 @@ pub struct ControllerConfig {
     /// GID of `/dev/kvm` on the node. Not standardised — Ubuntu assigns it
     /// dynamically, so it is a deployment-time value, not a constant.
     pub kvm_gid: i64,
-    pub prerunner_image: String,
     pub runtime_image: String,
     pub bridge_image: String,
     pub bridge_port: i32,
@@ -66,7 +64,6 @@ impl ControllerConfig {
     pub fn new(
         msb_home: impl Into<String>,
         kvm_gid: i64,
-        prerunner_image: impl Into<String>,
         runtime_image: impl Into<String>,
         bridge_image: impl Into<String>,
         bridge_port: i32,
@@ -87,7 +84,6 @@ impl ControllerConfig {
         Ok(Self {
             msb_home,
             kvm_gid,
-            prerunner_image: prerunner_image.into(),
             runtime_image: runtime_image.into(),
             bridge_image: bridge_image.into(),
             bridge_port,
@@ -160,7 +156,6 @@ mod tests {
         ControllerConfig::new(
             home,
             104,
-            "prerunner:dev",
             "runtime:dev",
             "bridge:dev",
             7000,

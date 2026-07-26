@@ -6,7 +6,9 @@
 //! process has to live as long as the sandbox does.
 
 mod net;
+mod secrets;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -43,19 +45,26 @@ struct Cli {
     #[arg(long, default_value = "/msb", env = "MSB_HOME")]
     msb_home: PathBuf,
 
-    /// Resolved secrets written by the prerunner. Absent means no secrets.
-    #[arg(long, default_value = "/msb-config/secrets.json", env = "MSB_SECRETS")]
-    secrets: PathBuf,
+    /// Root of the kubelet-mounted Secret volumes: `<dir>/<secretName>/<key>`.
+    #[arg(long, default_value = "/msb-secrets", env = "MSB_SECRETS_DIR")]
+    secrets_dir: PathBuf,
 }
 
-/// Loads the prerunner's resolved secrets. A missing file means the sandbox has
-/// no secrets (the prerunner skips the write when `spec.secrets` is empty).
-fn load_secrets(path: &std::path::Path) -> Result<Vec<ResolvedSecret>> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).context("parsing resolved secrets"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+/// Reads each referenced Secret's plaintext from its kubelet-mounted volume (no
+/// API access) and resolves it. A missing file is a hard error: the pod fails
+/// closed rather than booting with an empty secret.
+fn resolve_secrets(
+    spec: &SandboxSpec,
+    secrets_dir: &std::path::Path,
+) -> Result<Vec<ResolvedSecret>> {
+    let mut plaintext = BTreeMap::new();
+    for (name, key) in secrets::required_keys(&spec.secrets) {
+        let path = secrets_dir.join(&name).join(&key);
+        let value = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading secret {name}/{key} at {}", path.display()))?;
+        plaintext.insert((name, key), value.trim_end_matches('\n').to_string());
     }
+    secrets::resolve(&spec.secrets, &plaintext).context("resolving secrets")
 }
 
 #[tokio::main]
@@ -66,7 +75,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let spec: SandboxSpec = serde_json::from_str(&cli.spec).context("parsing MSB_SANDBOX_SPEC")?;
-    let secrets = load_secrets(&cli.secrets)?;
+    let secrets = resolve_secrets(&spec, &cli.secrets_dir)?;
 
     // The SDK's own setters, not env mutation — the workspace forbids unsafe.
     set_sdk_msb_path(&cli.msb_path);
