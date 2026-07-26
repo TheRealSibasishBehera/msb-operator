@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use kube::api::{DeleteParams, ListParams};
 use kube::Api;
-use msb_contract::{CloudMessageResponse, CloudPaginated};
+use microsandbox_types::{CloudMessageResponse, CloudPaginated};
 use msb_crd::Sandbox;
 
 use crate::auth::{self, Identity};
@@ -116,7 +116,7 @@ pub async fn stop(
     }
     // Report it as Stopping regardless of its pre-delete phase.
     let mut cloud = convert::sandbox_to_cloud(&sb, &id.namespace);
-    cloud.status = msb_contract::CloudSandboxStatus::Stopping;
+    cloud.status = microsandbox_types::CloudSandboxStatus::Stopping;
     Json(cloud).into_response()
 }
 

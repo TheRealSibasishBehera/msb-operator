@@ -5,7 +5,6 @@ members = [
     "crates/msb-controller",
     "crates/msb-daemon",
     "crates/msb-bridge",
-    "crates/msb-contract",
     "crates/msb-gateway",
     "crates/msb-runtime",
     "xtask",

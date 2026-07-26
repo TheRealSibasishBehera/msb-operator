@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use kube::api::ObjectMeta;
-use msb_contract::{CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus};
+use microsandbox_types::{CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus};
 use msb_crd::{Sandbox, SandboxPhase, SandboxSpec, SandboxStatus};
 
 use crate::error::GatewayError;

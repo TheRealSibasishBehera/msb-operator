@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use kube::api::{DeleteParams, ObjectMeta, PostParams};
 use kube::Api;
-use msb_contract::CloudCreateSandboxRequest;
+use microsandbox_types::CloudCreateSandboxRequest;
 use msb_crd::{Sandbox, SandboxPhase};
 use serde::Deserialize;
 use tracing::warn;

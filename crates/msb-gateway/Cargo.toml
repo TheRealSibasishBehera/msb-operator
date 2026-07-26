@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 msb-crd = { path = "../msb-crd" }
-msb-contract = { path = "../msb-contract" }
+microsandbox-types = { workspace = true }
 chrono.workspace = true
 kube.workspace = true
 k8s-openapi = { version = "0.28", features = ["v1_32"], default-features = false }
