@@ -1,0 +1,21 @@
+{{- if .Values.gateway.enabled }}
+# ClusterIP only — the minimum-exposure default. In-cluster clients reach the
+# gateway here; a developer uses `kubectl port-forward svc/msb-gateway`. External
+# users add their own Ingress/Gateway + TLS (never baked in — TLS, DNS, and
+# public-auth hardening are cluster-specific).
+apiVersion: v1
+kind: Service
+metadata:
+  name: msb-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "msb-operator.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "msb-operator.gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.port }}
+      targetPort: http
+{{- end }}

@@ -24,6 +24,12 @@ app.kubernetes.io/name: msb-daemon
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* Gateway selector labels. */}}
+{{- define "msb-operator.gateway.selectorLabels" -}}
+app.kubernetes.io/name: msb-gateway
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
 {{/*
 Build a fully-qualified image reference: <registry>/<repo>:<tag>.
 Call with a dict {registry, repo, tag, defaultTag} — tag falls back to
@@ -37,4 +43,9 @@ defaultTag (the chart appVersion) when empty.
 {{/* The controller ServiceAccount name. */}}
 {{- define "msb-operator.controller.serviceAccountName" -}}
 msb-controller
+{{- end -}}
+
+{{/* The gateway ServiceAccount name. */}}
+{{- define "msb-operator.gateway.serviceAccountName" -}}
+msb-gateway
 {{- end -}}
