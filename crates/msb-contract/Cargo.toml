@@ -11,4 +11,4 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-microsandbox-types = "0.6.6"
+microsandbox-types = { workspace = true }
