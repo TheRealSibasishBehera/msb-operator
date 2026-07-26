@@ -2944,13 +2944,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "msb-contract"
-version = "0.1.0"
-dependencies = [
- "microsandbox-types",
-]
-
-[[package]]
 name = "msb-controller"
 version = "0.1.0"
 dependencies = [
@@ -3022,7 +3015,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
- "msb-contract",
+ "microsandbox-types",
  "msb-crd",
  "serde",
  "serde_json",
