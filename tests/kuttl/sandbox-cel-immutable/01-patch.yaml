@@ -3,7 +3,8 @@ kind: TestStep
 commands:
   - script: |
       # CEL immutability: the API server must reject a spec patch (non-zero exit).
-      if kubectl patch sandbox test-immutable --type=merge \
+      # kuttl runs each case in its own namespace, so target $NAMESPACE explicitly.
+      if kubectl patch sandbox test-immutable -n "$NAMESPACE" --type=merge \
           -p '{"spec":{"cpus":4}}' 2>&1 | grep -q "immutable after creation"; then
         echo "PASS: spec mutation rejected"
         exit 0
