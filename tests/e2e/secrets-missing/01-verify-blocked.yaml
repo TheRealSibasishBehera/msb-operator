@@ -1,0 +1,36 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # Fail-closed: with the referenced Secret absent, the pod must be blocked and
+  # the sandbox must NOT reach Running. Verify (a) it stays not-Running for a
+  # sustained window, and (b) the block is the expected missing-Secret mount
+  # failure — not some unrelated error.
+  - script: |
+      set -e
+      pod=sandbox-e2e-sec-missing
+
+      # Give the controller time to create the pod, then confirm it is blocked.
+      blocked=""
+      for i in $(seq 1 15); do
+        ph=$(kubectl get sandbox e2e-sec-missing -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
+        if [ "$ph" = "Running" ]; then
+          echo "FAIL: sandbox reached Running despite a missing secret (not fail-closed)"; exit 1
+        fi
+        if kubectl get events -n "$NAMESPACE" 2>/dev/null \
+             | grep -q "FailedMount.*nonexistent-secret"; then
+          blocked=1; break
+        fi
+        sleep 4
+      done
+
+      if [ -z "$blocked" ]; then
+        echo "FAIL: expected a FailedMount for the missing Secret; none seen"
+        kubectl describe pod "$pod" -n "$NAMESPACE" 2>&1 | grep -iE "secret|mount|reason" | head
+        exit 1
+      fi
+
+      # Confirm it stays blocked (does not silently recover into Running).
+      sleep 8
+      ph=$(kubectl get sandbox e2e-sec-missing -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
+      if [ "$ph" = "Running" ]; then echo "FAIL: recovered to Running"; exit 1; fi
+      echo "PASS: fail-closed — missing Secret blocks the pod (FailedMount), sandbox never Running (phase='${ph}')"

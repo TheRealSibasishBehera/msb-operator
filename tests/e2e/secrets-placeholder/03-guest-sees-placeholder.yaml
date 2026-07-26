@@ -1,0 +1,18 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # The secret is wired into the guest as a PLACEHOLDER (msb_secret_<ENV>), never
+  # the plaintext — the proxy substitutes the real value only for allowed hosts.
+  # This asserts the security property: the plaintext never enters the guest.
+  - script: |
+      set -e
+      out=$(kubectl exec sandbox-e2e-sec-ok -n "$NAMESPACE" -c msb-runtime -- \
+        msb exec "${NAMESPACE}__e2e-sec-ok" -- sh -c 'printf "%s" "$API_KEY"' 2>/dev/null)
+      echo "guest API_KEY=[$out]"
+      if [ "$out" = "msb_secret_API_KEY" ]; then
+        echo "PASS: guest sees the placeholder, not the plaintext"
+      elif printf '%s' "$out" | grep -q "SUPERSECRETVALUE123"; then
+        echo "FAIL: plaintext secret LEAKED into the guest"; exit 1
+      else
+        echo "FAIL: unexpected API_KEY value in guest: [$out]"; exit 1
+      fi
