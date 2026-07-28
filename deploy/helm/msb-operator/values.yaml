@@ -52,14 +52,18 @@ daemon:
   tag: ""
   # -- Path to the KVM device node the daemon watches.
   kvmPath: /dev/kvm
+  # -- Host dir the daemon pulls images into and injects read-only into sandboxes.
+  cacheHostPath: /var/lib/msb/cache
   # -- Daemon log level (RUST_LOG).
   logLevel: info
+  # Sized for `msb pull` conversion (tar ingest + EROFS/VMDK build), not the old
+  # device-plugin-only footprint.
   resources:
     requests:
-      cpu: 10m
-      memory: 32Mi
+      cpu: 250m
+      memory: 256Mi
     limits:
-      memory: 64Mi
+      memory: 1Gi
   # Runs on every KVM-capable node; tolerate everything by default.
   # -- Daemon scheduling tolerations (defaults to tolerate all taints).
   tolerations:
