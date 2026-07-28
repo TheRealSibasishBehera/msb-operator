@@ -1,5 +1,6 @@
 mod device_plugin;
 mod health;
+mod pull;
 
 pub(crate) mod pb {
     tonic::include_proto!("v1beta1");
@@ -21,6 +22,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     DevicePlugin(DevicePluginArgs),
+    Pull(PullArgs),
 }
 
 #[derive(Parser)]
@@ -28,6 +30,20 @@ struct DevicePluginArgs {
     /// Path to the KVM device node to watch.
     #[arg(long, default_value = "/dev/kvm")]
     kvm_path: PathBuf,
+}
+
+#[derive(Parser)]
+struct PullArgs {
+    /// OCI image reference to pull and convert (e.g. `python:3.12`).
+    image: String,
+
+    /// `MSB_HOME` for the pull; the cache lands under `<msb-home>/cache`.
+    #[arg(long, default_value = "/msb", env = "MSB_HOME")]
+    msb_home: PathBuf,
+
+    /// Path to the `msb` binary.
+    #[arg(long, default_value = "/usr/local/bin/msb", env = "MSB_PATH")]
+    msb_path: PathBuf,
 }
 
 #[tokio::main]
@@ -45,6 +61,11 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("initialising health watcher")?;
             device_plugin::run(health_rx).await
+        }
+        Commands::Pull(args) => {
+            pull::pull(&args.msb_path, &args.msb_home, &args.image)
+                .await
+                .context("pulling image")
         }
     }
 }
