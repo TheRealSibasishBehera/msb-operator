@@ -93,19 +93,11 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         ("microsandbox.io/sandbox-name".to_string(), name.clone()),
     ]);
 
-    // The cache volume references a derived tag, so record the user's app image
-    // here to keep the pod self-describing.
-    let annotations = BTreeMap::from([(
-        "microsandbox.io/image".to_string(),
-        sandbox.spec.image.clone(),
-    )]);
-
     Ok(Pod {
         metadata: ObjectMeta {
             name: Some(pod_name(&name)),
             namespace: Some(namespace.clone()),
             labels: Some(labels),
-            annotations: Some(annotations),
             owner_references: Some(vec![owner]),
             ..Default::default()
         },
@@ -119,7 +111,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
                 &flat_name,
                 &sandbox.spec,
             )],
-            volumes: Some(volumes(&cfg.cache_ref(&sandbox.spec.image), &sandbox.spec)),
+            volumes: Some(volumes(&sandbox.spec)),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
                 run_as_user: Some(RUN_AS_USER),
@@ -316,7 +308,7 @@ fn secret_vol_name(secret_name: &str) -> String {
     format!("secret-{}", sanitized.trim_matches('-'))
 }
 
-fn volumes(cache_ref: &str, spec: &SandboxSpec) -> Vec<Volume> {
+fn volumes(spec: &SandboxSpec) -> Vec<Volume> {
     let mut vols = vec![
         Volume {
             name: VOL_HOME.to_string(),
@@ -328,10 +320,9 @@ fn volumes(cache_ref: &str, spec: &SandboxSpec) -> Vec<Volume> {
         },
         Volume {
             name: VOL_CACHE.to_string(),
-            // The pre-baked cache image (derived from the app image) the kubelet
-            // pulls as an image volume; msb boots from it in place.
+            // msb boots from the app image, pulled as an image volume, in place.
             image: Some(ImageVolumeSource {
-                reference: Some(cache_ref.to_string()),
+                reference: Some(spec.image.clone()),
                 pull_policy: Some("IfNotPresent".to_string()),
             }),
             ..Default::default()
@@ -434,7 +425,6 @@ pub(crate) mod test_support {
             "ghcr.io/msb/runtime:dev",
             "ghcr.io/msb/bridge:dev",
             7000,
-            "reg.example.com/msb-cache",
         )
         .expect("valid test config")
     }
@@ -816,23 +806,9 @@ mod tests {
         assert!(home.empty_dir.is_some(), "home must be an emptyDir");
         assert!(home.host_path.is_none(), "home must not be a hostPath");
 
-        // The cache volume references the DERIVED cache-image tag, not the raw
-        // app image (which msb keys the cache by, passed separately to the SDK).
+        // The cache volume references spec.image directly (no derived tag).
         let cache = by_name(VOL_CACHE).image.as_ref().unwrap();
-        let reference = cache.reference.as_deref().unwrap();
-        assert_eq!(reference, config().cache_ref("python:3.12"));
-        assert!(reference.starts_with("reg.example.com/msb-cache/python-3-12-"));
-        assert_ne!(reference, "python:3.12");
-    }
-
-    #[test]
-    fn records_the_app_image_as_a_pod_annotation() {
-        let pod = build(&sandbox(), &config()).unwrap();
-        let ann = pod.metadata.annotations.as_ref().unwrap();
-        assert_eq!(
-            ann.get("microsandbox.io/image").map(String::as_str),
-            Some("python:3.12")
-        );
+        assert_eq!(cache.reference.as_deref(), Some("python:3.12"));
     }
 
     #[test]
