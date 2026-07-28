@@ -43,11 +43,6 @@ struct Cli {
     #[arg(long, default_value_t = 7000, env = "MSB_BRIDGE_PORT")]
     bridge_port: i32,
 
-    /// Registry/repo prefix for pre-baked cache images. The controller derives a
-    /// sandbox's cache-image reference from `spec.image` under this prefix.
-    #[arg(long, default_value = "", env = "MSB_CACHE_PREFIX")]
-    cache_prefix: String,
-
     /// Namespace where the controller runs and holds its leader-election Lease.
     #[arg(long, default_value = "msb-system", env = "MSB_NAMESPACE")]
     namespace: String,
@@ -72,7 +67,6 @@ async fn main() -> anyhow::Result<()> {
         cli.runtime_image,
         cli.bridge_image,
         cli.bridge_port,
-        cli.cache_prefix,
     )
     .context("invalid controller configuration")?;
 

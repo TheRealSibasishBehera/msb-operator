@@ -112,11 +112,6 @@ sandbox:
   bridgeImage: msb-bridge
   runtimeTag: ""
   bridgeTag: ""
-  # Registry/repo prefix for pre-baked cache images. The controller derives each
-  # sandbox's cache-image reference from spec.image under this prefix. Defaults
-  # to `<registry>/msb-cache` when empty.
-  # -- Prefix for pre-baked cache images (defaults to `<registry>/msb-cache`).
-  cachePrefix: ""
 
 # Let the chart create its own namespace, labelled `enforce: privileged`. The
 # daemon mounts hostPath (device-plugin socket + /dev/kvm), which both
