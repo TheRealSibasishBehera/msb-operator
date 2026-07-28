@@ -40,7 +40,11 @@ fn prior_conditions(sandbox: &Sandbox) -> Vec<SandboxCondition> {
 pub const ANN_TERMINATION_REASON: &str = "microsandbox.io/termination-reason";
 pub const ANN_TERMINATED_AT: &str = "microsandbox.io/terminated-at";
 
-const REQUEUE_WHILE_PENDING: Duration = Duration::from_secs(5);
+// Fallback re-check cadence while a pod is Pending. The `.owns(pods)` watch
+// normally reconciles the instant the pod flips Running; this only backstops a
+// coalesced/late watch event, so keep it short — Pending is a brief window and a
+// few extra get_opt calls there buy a much tighter time-to-Running.
+const REQUEUE_WHILE_PENDING: Duration = Duration::from_millis(500);
 
 /// Backoff before recreating a pod on `RerunOnFailure`. kube-rs backs off only on
 /// reconcile *errors*; a retry after a clean success-path exit is not an error, so
