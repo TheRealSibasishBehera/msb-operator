@@ -30,6 +30,10 @@ struct DevicePluginArgs {
     /// Path to the KVM device node to watch.
     #[arg(long, default_value = "/dev/kvm")]
     kvm_path: PathBuf,
+
+    /// Host cache dir, injected read-only into each sandbox alongside /dev/kvm.
+    #[arg(long, default_value = "/var/lib/msb/cache", env = "MSB_CACHE_HOST_PATH")]
+    cache_host_path: PathBuf,
 }
 
 #[derive(Parser)]
@@ -60,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
             let health_rx = health::watch_path(args.kvm_path)
                 .await
                 .context("initialising health watcher")?;
-            device_plugin::run(health_rx).await
+            device_plugin::run(health_rx, args.cache_host_path).await
         }
         Commands::Pull(args) => {
             pull::pull(&args.msb_path, &args.msb_home, &args.image)

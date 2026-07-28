@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, ImageVolumeSource,
-    KeyToPath, Pod, PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile,
-    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
+    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, KeyToPath, Pod,
+    PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile, SecretVolumeSource,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -11,8 +11,8 @@ use kube::Resource;
 use msb_crd::{Sandbox, SandboxSpec};
 
 use crate::config::{
-    CACHE_MOUNT, CPU_ALLOCATION_RATIO, ControllerConfig, EPHEMERAL_STORAGE_MIB, KVM_RESOURCE,
-    SANDBOX_LABEL, memory_overhead_mib,
+    CPU_ALLOCATION_RATIO, ControllerConfig, EPHEMERAL_STORAGE_MIB, KVM_RESOURCE, SANDBOX_LABEL,
+    memory_overhead_mib,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -29,7 +29,6 @@ pub enum PodBuildError {
 }
 
 const VOL_HOME: &str = "msb-home";
-const VOL_CACHE: &str = "msb-cache";
 
 /// Referenced Secrets mount read-only here, one dir per Secret; the runtime reads
 /// `<SECRETS_MOUNT>/<secretName>/<key>`. The kubelet does the read, so the pod
@@ -139,21 +138,13 @@ fn runtime_container(
     flat_name: &str,
     spec: &SandboxSpec,
 ) -> Container {
-    let mut mounts = vec![
-        VolumeMount {
-            name: VOL_HOME.to_string(),
-            mount_path: cfg.msb_home().to_string(),
-            ..Default::default()
-        },
-        // msb boots from the cache in place and never writes to it. Mounted
-        // at $MSB_HOME/cache so the VMDK's baked absolute paths resolve.
-        VolumeMount {
-            name: VOL_CACHE.to_string(),
-            mount_path: CACHE_MOUNT.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        },
-    ];
+    // No cache mount: the daemon's device plugin injects it read-only at
+    // $MSB_HOME/cache, keeping the pod volume-free and PSA `restricted`-clean.
+    let mut mounts = vec![VolumeMount {
+        name: VOL_HOME.to_string(),
+        mount_path: cfg.msb_home().to_string(),
+        ..Default::default()
+    }];
     // The runtime resolves secrets in-process from these mounts — no init container.
     for secret_name in referenced_secret_names(spec) {
         mounts.push(VolumeMount {
@@ -309,25 +300,14 @@ fn secret_vol_name(secret_name: &str) -> String {
 }
 
 fn volumes(spec: &SandboxSpec) -> Vec<Volume> {
-    let mut vols = vec![
-        Volume {
-            name: VOL_HOME.to_string(),
-            // Per-pod writable home (db/, sandboxes/, run/): keeps each sandbox's
-            // state off the node and invisible to other pods. The shared cache is
-            // a separate read-only image volume.
-            empty_dir: Some(EmptyDirVolumeSource::default()),
-            ..Default::default()
-        },
-        Volume {
-            name: VOL_CACHE.to_string(),
-            // msb boots from the app image, pulled as an image volume, in place.
-            image: Some(ImageVolumeSource {
-                reference: Some(spec.image.clone()),
-                pull_policy: Some("IfNotPresent".to_string()),
-            }),
-            ..Default::default()
-        },
-    ];
+    // Per-pod writable home (db/, sandboxes/, run/): keeps each sandbox's state
+    // off the node and invisible to other pods. The shared read-only cache is not
+    // a volume — the daemon's device plugin injects it (see runtime_container).
+    let mut vols = vec![Volume {
+        name: VOL_HOME.to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    }];
 
     // One volume per referenced Secret, projecting only the referenced keys.
     for secret_name in referenced_secret_names(spec) {
@@ -779,7 +759,8 @@ mod tests {
 
     #[test]
     fn runtime_gets_no_rootfs_vmdk_env() {
-        // The runtime boots via the cache image reference, not a vmdk path.
+        // The runtime boots from the app image against the injected cache, not a
+        // vmdk path.
         let pod = build(&sandbox(), &config()).unwrap();
         assert_eq!(
             env_of(container(&pod, "msb-runtime"), "MSB_ROOTFS_VMDK"),
@@ -788,39 +769,35 @@ mod tests {
     }
 
     #[test]
-    fn declares_home_and_cache_volumes() {
+    fn declares_only_the_home_volume() {
+        // The cache is device-plugin-injected, so it never appears in the pod spec.
         let pod = build(&sandbox(), &config()).unwrap();
         let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let names: Vec<_> = vols.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, vec![VOL_HOME, VOL_CACHE]);
+        assert_eq!(names, vec![VOL_HOME]);
     }
 
     #[test]
-    fn home_is_a_per_pod_emptydir_and_cache_is_an_image_volume() {
+    fn home_is_a_per_pod_emptydir() {
         let pod = build(&sandbox(), &config()).unwrap();
         let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
-        let by_name = |n: &str| vols.iter().find(|v| v.name == n).unwrap();
-
-        // Per-pod writable home, not a node-shared hostPath.
-        let home = by_name(VOL_HOME);
+        let home = vols.iter().find(|v| v.name == VOL_HOME).unwrap();
         assert!(home.empty_dir.is_some(), "home must be an emptyDir");
         assert!(home.host_path.is_none(), "home must not be a hostPath");
-
-        // The cache volume references spec.image directly (no derived tag).
-        let cache = by_name(VOL_CACHE).image.as_ref().unwrap();
-        assert_eq!(cache.reference.as_deref(), Some("python:3.12"));
     }
 
     #[test]
-    fn runtime_mounts_the_cache_read_only_at_msb_home_cache() {
+    fn runtime_declares_no_cache_mount() {
+        // The cache mount is device-plugin-injected, never declared here.
         let pod = build(&sandbox(), &config()).unwrap();
         let mounts = container(&pod, "msb-runtime")
             .volume_mounts
             .as_ref()
             .unwrap();
-        let cache = mounts.iter().find(|m| m.name == VOL_CACHE).unwrap();
-        assert_eq!(cache.mount_path, "/msb/cache");
-        assert_eq!(cache.read_only, Some(true));
+        assert!(
+            mounts.iter().all(|m| m.mount_path != "/msb/cache"),
+            "cache must not be a declared VolumeMount"
+        );
     }
 
     #[test]

@@ -12,9 +12,6 @@ pub const KVM_RESOURCE: &str = "devices.microsandbox.io/kvm";
 pub const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
 pub const FIELD_MANAGER: &str = "msb-controller";
 
-/// Must be `$MSB_HOME/cache` so the cache's baked absolute VMDK paths resolve.
-pub const CACHE_MOUNT: &str = "/msb/cache";
-
 // Runtime-container resource sizing. On top of the guest RAM the pod carries the
 // VMM + runtime process overhead. The base is calibrated from a measured idle
 // boot (runtime + VMM peak ≈ 75Mi at 512Mi/1vCPU), rounded up for headroom.
