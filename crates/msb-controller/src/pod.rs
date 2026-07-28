@@ -176,6 +176,11 @@ fn runtime_container(
                 value: Some(cfg.msb_home().to_string()),
                 ..Default::default()
             },
+            EnvVar {
+                name: "RUST_LOG".to_string(),
+                value: Some(cfg.runtime_log.clone()),
+                ..Default::default()
+            },
         ]),
         volume_mounts: Some(mounts),
         resources: Some(runtime_resources(spec.cpus, spec.memory)),
@@ -685,6 +690,16 @@ mod tests {
         assert_eq!(
             env_of(rt, "MSB_SANDBOX_NAME"),
             Some("team-a__my-sandbox".to_string())
+        );
+    }
+
+    #[test]
+    fn stamps_rust_log_on_the_runtime() {
+        let cfg = config().with_runtime_log("debug");
+        let pod = build(&sandbox(), &cfg).unwrap();
+        assert_eq!(
+            env_of(container(&pod, "msb-runtime"), "RUST_LOG"),
+            Some("debug".to_string())
         );
     }
 

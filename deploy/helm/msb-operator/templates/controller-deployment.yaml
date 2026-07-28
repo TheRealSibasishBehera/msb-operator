@@ -49,6 +49,8 @@ spec:
               value: {{ include "msb-operator.image" (dict "registry" $reg "repo" .Values.sandbox.runtimeImage "tag" .Values.sandbox.runtimeTag "defaultTag" $ver) }}
             - name: MSB_BRIDGE_IMAGE
               value: {{ include "msb-operator.image" (dict "registry" $reg "repo" .Values.sandbox.bridgeImage "tag" .Values.sandbox.bridgeTag "defaultTag" $ver) }}
+            - name: MSB_RUNTIME_LOG
+              value: {{ .Values.sandbox.runtimeLog | quote }}
             - name: RUST_LOG
               value: {{ .Values.controller.logLevel | quote }}
           securityContext:

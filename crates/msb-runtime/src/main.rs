@@ -71,17 +71,27 @@ fn resolve_secrets(
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
+
+    // Log elapsed-since-start at each boundary so the boot path is a grep.
+    let t0 = std::time::Instant::now();
+    let phase =
+        |name: &str| info!(elapsed_ms = t0.elapsed().as_millis() as u64, phase = name, "boot phase");
 
     let cli = Cli::parse();
     let spec: SandboxSpec = serde_json::from_str(&cli.spec).context("parsing MSB_SANDBOX_SPEC")?;
+    phase("parsed spec");
 
     // Boot is PullPolicy::Never, so the daemon must have populated the cache
     // first. Wait for its ready marker before touching the SDK.
     cache_wait::wait(&cli.msb_home.join("cache"), &spec.image)
         .await
         .context("waiting for the node cache")?;
+    phase("cache ready");
 
     let secrets = resolve_secrets(&spec, &cli.secrets_dir)?;
 
@@ -115,11 +125,13 @@ async fn main() -> Result<()> {
         "booting sandbox from pre-baked cache"
     );
     let config = builder.build().await.context("building sandbox config")?;
+    phase("sdk config built");
     // `create` (not `create_detached`) returns once the guest is ready and
     // leaves this process owning the VMM; `wait` then blocks until it exits.
     let sandbox = Sandbox::create(config)
         .await
         .context("create: booting the sandbox")?;
+    phase("guest booted");
     info!(sandbox = %cli.sandbox_name, "sandbox booted; supervising until it exits");
 
     let stop = sandbox

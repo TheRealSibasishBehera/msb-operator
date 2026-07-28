@@ -116,6 +116,8 @@ sandbox:
   bridgeImage: msb-bridge
   runtimeTag: ""
   bridgeTag: ""
+  # -- RUST_LOG for sandbox runtime containers (boot-phase debugging).
+  runtimeLog: info
 
 # Let the chart create its own namespace, labelled `enforce: privileged`. The
 # daemon mounts hostPath (device-plugin socket + /dev/kvm), which both
