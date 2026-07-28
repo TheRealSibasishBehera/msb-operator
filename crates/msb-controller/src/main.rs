@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long, default_value_t = 7000, env = "MSB_BRIDGE_PORT")]
     bridge_port: i32,
 
+    /// `RUST_LOG` stamped onto sandbox runtime containers (for boot debugging).
+    #[arg(long, default_value = "info", env = "MSB_RUNTIME_LOG")]
+    runtime_log: String,
+
     /// Namespace where the controller runs and holds its leader-election Lease.
     #[arg(long, default_value = "msb-system", env = "MSB_NAMESPACE")]
     namespace: String,
@@ -68,7 +72,8 @@ async fn main() -> anyhow::Result<()> {
         cli.bridge_image,
         cli.bridge_port,
     )
-    .context("invalid controller configuration")?;
+    .context("invalid controller configuration")?
+    .with_runtime_log(cli.runtime_log);
 
     let client = Client::try_default()
         .await

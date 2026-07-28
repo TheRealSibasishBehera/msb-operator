@@ -50,6 +50,8 @@ pub struct ControllerConfig {
     pub runtime_image: String,
     pub bridge_image: String,
     pub bridge_port: i32,
+    /// `RUST_LOG` stamped onto the runtime container so its boot is observable.
+    pub runtime_log: String,
 }
 
 impl ControllerConfig {
@@ -78,7 +80,14 @@ impl ControllerConfig {
             runtime_image: runtime_image.into(),
             bridge_image: bridge_image.into(),
             bridge_port,
+            runtime_log: "info".to_string(),
         })
+    }
+
+    /// Sets the `RUST_LOG` the runtime container runs with.
+    pub fn with_runtime_log(mut self, level: impl Into<String>) -> Self {
+        self.runtime_log = level.into();
+        self
     }
 
     /// Validated at construction, so it cannot be set past `MSB_HOME_MAX_BYTES`.
