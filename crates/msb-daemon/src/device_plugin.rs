@@ -11,13 +11,17 @@ use tracing::{info, warn};
 
 use crate::pb::{
     AllocateRequest, AllocateResponse, ContainerAllocateResponse, Device, DevicePluginOptions,
-    DeviceSpec, Empty, ListAndWatchResponse, PreStartContainerRequest, PreStartContainerResponse,
-    PreferredAllocationRequest, PreferredAllocationResponse, RegisterRequest,
+    DeviceSpec, Empty, ListAndWatchResponse, Mount, PreStartContainerRequest,
+    PreStartContainerResponse, PreferredAllocationRequest, PreferredAllocationResponse,
+    RegisterRequest,
     device_plugin_server::{DevicePlugin, DevicePluginServer},
     registration_client::RegistrationClient,
 };
 
 const RESOURCE_NAME: &str = "devices.microsandbox.io/kvm";
+
+/// Must be `/msb/cache` so the VMDK's baked absolute extents resolve.
+const CACHE_MOUNT: &str = "/msb/cache";
 const API_VERSION: &str = "v1beta1";
 const KUBELET_SOCKET: &str = "/var/lib/kubelet/device-plugins/kubelet.sock";
 const PLUGIN_SOCKET_NAME: &str = "msb-kvm.sock";
@@ -41,11 +45,16 @@ fn build_device_list(healthy: bool) -> Vec<Device> {
 
 pub struct KvmDevicePlugin {
     health_rx: watch::Receiver<bool>,
+    /// Host cache dir, injected read-only into each sandbox at `CACHE_MOUNT`.
+    cache_host_path: PathBuf,
 }
 
 impl KvmDevicePlugin {
-    pub fn new(health_rx: watch::Receiver<bool>) -> Self {
-        Self { health_rx }
+    pub fn new(health_rx: watch::Receiver<bool>, cache_host_path: PathBuf) -> Self {
+        Self {
+            health_rx,
+            cache_host_path,
+        }
     }
 }
 
@@ -110,6 +119,18 @@ impl DevicePlugin for KvmDevicePlugin {
         &self,
         request: Request<AllocateRequest>,
     ) -> Result<Response<AllocateResponse>, Status> {
+        // The kubelet bind-mounts host_path as-is; a missing dir is a mount error,
+        // so ensure it exists before returning the Mount.
+        std::fs::create_dir_all(&self.cache_host_path).map_err(|e| {
+            Status::internal(format!(
+                "creating cache dir {}: {e}",
+                self.cache_host_path.display()
+            ))
+        })?;
+        let cache_host_path = self.cache_host_path.display().to_string();
+
+        // Deliver the cache as a device-plugin Mount, not a pod volume: injected
+        // kubelet-side, it never appears in the pod spec, so PSA stays `restricted`.
         let responses = request
             .into_inner()
             .container_requests
@@ -121,7 +142,11 @@ impl DevicePlugin for KvmDevicePlugin {
                     permissions: "rw".to_owned(),
                 }],
                 envs: Default::default(),
-                mounts: vec![],
+                mounts: vec![Mount {
+                    host_path: cache_host_path.clone(),
+                    container_path: CACHE_MOUNT.to_owned(),
+                    read_only: true,
+                }],
                 annotations: Default::default(),
                 cdi_devices: vec![],
             })
@@ -200,13 +225,16 @@ async fn wait_for_kubelet_restart(kubelet_sock: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run(health_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
+pub async fn run(
+    health_rx: watch::Receiver<bool>,
+    cache_host_path: PathBuf,
+) -> anyhow::Result<()> {
     loop {
         let socket_path = PathBuf::from(PLUGIN_DIR).join(PLUGIN_SOCKET_NAME);
 
         let _ = std::fs::remove_file(&socket_path);
 
-        let plugin = KvmDevicePlugin::new(health_rx.clone());
+        let plugin = KvmDevicePlugin::new(health_rx.clone(), cache_host_path.clone());
         let server = DevicePluginServer::new(plugin);
 
         let listener = {
@@ -277,5 +305,32 @@ mod tests {
         let list = build_device_list(true);
         let ids: std::collections::HashSet<_> = list.iter().map(|d| &d.id).collect();
         assert_eq!(ids.len(), POOL_SIZE);
+    }
+
+    #[tokio::test]
+    async fn allocate_injects_kvm_and_a_read_only_cache_mount() {
+        use crate::pb::ContainerAllocateRequest;
+
+        let cache = tempfile::tempdir().unwrap();
+        let (_tx, rx) = watch::channel(true);
+        let plugin = KvmDevicePlugin::new(rx, cache.path().to_path_buf());
+
+        let resp = plugin
+            .allocate(Request::new(AllocateRequest {
+                container_requests: vec![ContainerAllocateRequest {
+                    devices_ids: vec!["kvm-0".to_owned()],
+                }],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let cr = &resp.container_responses[0];
+        assert_eq!(cr.devices[0].container_path, "/dev/kvm");
+
+        assert_eq!(cr.mounts.len(), 1);
+        assert_eq!(cr.mounts[0].container_path, "/msb/cache");
+        assert_eq!(cr.mounts[0].host_path, cache.path().display().to_string());
+        assert!(cr.mounts[0].read_only);
     }
 }
