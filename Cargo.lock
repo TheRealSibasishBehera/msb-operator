@@ -3015,6 +3015,7 @@ dependencies = [
  "backon",
  "chrono",
  "clap",
+ "fastrand",
  "futures",
  "k8s-openapi",
  "kube",

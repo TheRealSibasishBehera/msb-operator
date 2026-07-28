@@ -31,8 +31,10 @@ pub struct CreateQuery {
     pub start: bool,
 }
 
-/// Poll interval while waiting for Running.
-const POLL: Duration = Duration::from_millis(500);
+/// Poll backoff while waiting for Running: tight at first so a fast boot is
+/// returned promptly, backing off to a cap for a slow one.
+const POLL_MIN: Duration = Duration::from_millis(20);
+const POLL_MAX: Duration = Duration::from_millis(500);
 
 pub async fn create(
     State(state): State<AppState>,
@@ -94,6 +96,7 @@ pub async fn create(
 
     // Watch until Running within the budget. Poll loop keeps deps light.
     let deadline = Instant::now() + state.create_timeout;
+    let mut poll = POLL_MIN;
     loop {
         let sb = match api.get(&req.name).await {
             Ok(sb) => sb,
@@ -136,7 +139,11 @@ pub async fn create(
             ))
             .into_response();
         }
-        tokio::time::sleep(POLL).await;
+        // Equal jitter so concurrent creates don't align their polls on the API server.
+        let half = poll / 2;
+        tokio::time::sleep(half + Duration::from_millis(fastrand::u64(0..=half.as_millis() as u64)))
+            .await;
+        poll = (poll * 2).min(POLL_MAX);
     }
 }
 

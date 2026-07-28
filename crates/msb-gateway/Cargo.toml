@@ -19,6 +19,7 @@ k8s-openapi = { version = "0.28", features = ["v1_32"], default-features = false
 tokio.workspace = true
 tokio-tungstenite = "0.24"
 backon = "1.6"
+fastrand = "2.4"
 futures.workspace = true
 axum = { version = "0.7", features = ["ws"] }
 serde.workspace = true
