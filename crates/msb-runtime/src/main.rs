@@ -5,6 +5,7 @@
 //! tears down the container cgroup and kills the VMM with it, so the runtime
 //! process has to live as long as the sandbox does.
 
+mod cache_wait;
 mod net;
 mod secrets;
 
@@ -75,6 +76,13 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let spec: SandboxSpec = serde_json::from_str(&cli.spec).context("parsing MSB_SANDBOX_SPEC")?;
+
+    // Boot is PullPolicy::Never, so the daemon must have populated the cache
+    // first. Wait for its ready marker before touching the SDK.
+    cache_wait::wait(&cli.msb_home.join("cache"), &spec.image)
+        .await
+        .context("waiting for the node cache")?;
+
     let secrets = resolve_secrets(&spec, &cli.secrets_dir)?;
 
     // The SDK's own setters, not env mutation — the workspace forbids unsafe.

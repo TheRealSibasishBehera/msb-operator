@@ -12,7 +12,7 @@ use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
 use tracing::{info, warn};
 
-use crate::pull;
+use crate::{marker, pull};
 
 const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
 const RUNTIME_CONTAINER: &str = "msb-runtime";
@@ -54,10 +54,13 @@ async fn handle_pod(pod: &Pod, msb: &std::path::Path, msb_home: &std::path::Path
         return;
     };
 
-    if let Err(e) = pull::pull(msb, msb_home, &image).await {
-        // A failed pull surfaces to the sandbox through the boot handshake; log
-        // here so the node-side cause is visible.
-        warn!(pod = %name, %image, error = %e, "pull failed");
+    let cache_root = msb_home.join("cache");
+    match pull::pull(msb, msb_home, &image).await {
+        Ok(()) => marker::write_ready(&cache_root, &image),
+        Err(e) => {
+            warn!(pod = %name, %image, error = %e, "pull failed");
+            marker::write_failed(&cache_root, &image, &e.to_string());
+        }
     }
 }
 
