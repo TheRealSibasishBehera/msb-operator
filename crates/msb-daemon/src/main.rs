@@ -1,5 +1,6 @@
 mod device_plugin;
 mod health;
+mod marker;
 mod pull;
 mod watch;
 

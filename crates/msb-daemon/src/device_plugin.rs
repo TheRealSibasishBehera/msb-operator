@@ -119,14 +119,8 @@ impl DevicePlugin for KvmDevicePlugin {
         &self,
         request: Request<AllocateRequest>,
     ) -> Result<Response<AllocateResponse>, Status> {
-        // The kubelet bind-mounts host_path as-is; a missing dir is a mount error,
-        // so ensure it exists before returning the Mount.
-        std::fs::create_dir_all(&self.cache_host_path).map_err(|e| {
-            Status::internal(format!(
-                "creating cache dir {}: {e}",
-                self.cache_host_path.display()
-            ))
-        })?;
+        // A node path (the DaemonSet's DirectoryOrCreate hostPath makes it), not
+        // creatable from this container — just the string the kubelet mounts.
         let cache_host_path = self.cache_host_path.display().to_string();
 
         // Deliver the cache as a device-plugin Mount, not a pod volume: injected
