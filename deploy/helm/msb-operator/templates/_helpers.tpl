@@ -49,3 +49,8 @@ msb-controller
 {{- define "msb-operator.gateway.serviceAccountName" -}}
 msb-gateway
 {{- end -}}
+
+{{/* The daemon ServiceAccount name. */}}
+{{- define "msb-operator.daemon.serviceAccountName" -}}
+msb-daemon
+{{- end -}}

@@ -18,6 +18,7 @@ spec:
     spec:
       priorityClassName: system-node-critical
       hostPID: false
+      serviceAccountName: {{ include "msb-operator.daemon.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -30,6 +31,13 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.daemon.logLevel | quote }}
+            # The node-scoped pod watch field-selects on spec.nodeName == this.
+            - name: MSB_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: MSB_CACHE_HOST_PATH
+              value: {{ .Values.daemon.cacheHostPath | quote }}
           resources:
             {{- toYaml .Values.daemon.resources | nindent 12 }}
           volumeMounts:
@@ -40,8 +48,15 @@ spec:
             - name: kvm
               mountPath: {{ .Values.daemon.kvmPath | quote }}
               readOnly: true
+            # msb pull runs with MSB_HOME=/msb; the host cache dir is mounted at
+            # /msb/cache so writes land in the cache the daemon injects into pods.
+            - name: msb-home
+              mountPath: /msb
+            - name: cache
+              mountPath: /msb/cache
           securityContext:
             allowPrivilegeEscalation: false
+            # msb pull writes to /msb (mounted volumes), never the container rootfs.
             readOnlyRootFilesystem: true
             # Root is needed to bind the device-plugin socket under
             # /var/lib/kubelet; it only reads /dev/kvm, and drops all caps.
@@ -57,6 +72,13 @@ spec:
           hostPath:
             path: {{ .Values.daemon.kvmPath | quote }}
             type: CharDevice
+        # Per-node MSB_HOME scratch (db/, run/); the cache lives under it on the host.
+        - name: msb-home
+          emptyDir: {}
+        - name: cache
+          hostPath:
+            path: {{ .Values.daemon.cacheHostPath | quote }}
+            type: DirectoryOrCreate
       {{- with .Values.daemon.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
