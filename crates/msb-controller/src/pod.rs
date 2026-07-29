@@ -26,6 +26,32 @@ pub enum PodBuildError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("sandbox {sandbox} has an invalid published port: {reason}")]
+    InvalidPorts { sandbox: String, reason: String },
+}
+
+/// Rejects published ports that collide with the bridge port or with each other,
+/// which would otherwise make the Pod/Service spec invalid at admission.
+fn validate_ports(spec: &SandboxSpec, cfg: &ControllerConfig, sandbox: &str) -> Result<(), PodBuildError> {
+    let bridge = u16::try_from(cfg.bridge_port).unwrap_or(u16::MAX);
+    let mut seen = std::collections::HashSet::new();
+    for p in &spec.network.published_ports {
+        let host = p.host_port();
+        if host == bridge {
+            return Err(PodBuildError::InvalidPorts {
+                sandbox: sandbox.to_string(),
+                reason: format!("hostPort {host} is reserved for the sandbox bridge"),
+            });
+        }
+        if !seen.insert(host) {
+            return Err(PodBuildError::InvalidPorts {
+                sandbox: sandbox.to_string(),
+                reason: format!("hostPort {host} is published more than once"),
+            });
+        }
+    }
+    Ok(())
 }
 
 const VOL_HOME: &str = "msb-home";
@@ -79,6 +105,8 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
                 key: "uid",
             })?;
 
+    validate_ports(&sandbox.spec, cfg, &name)?;
+
     let spec_json =
         serde_json::to_string(&sandbox.spec).map_err(|source| PodBuildError::SpecEncode {
             sandbox: name.clone(),
@@ -127,6 +155,36 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         }),
         status: None,
     })
+}
+
+/// Stable, RFC-1035-safe name for a published port, shared by the pod
+/// `containerPort` and the Service `ServicePort` so they line up.
+pub fn port_name(host_port: u16) -> String {
+    format!("port-{host_port}")
+}
+
+/// `containerPort` entries for the sandbox's published ports, `None` when there
+/// are none so the field is omitted rather than an empty list.
+fn published_container_ports(spec: &SandboxSpec) -> Option<Vec<ContainerPort>> {
+    let ports: Vec<ContainerPort> = spec
+        .network
+        .published_ports
+        .iter()
+        .map(|p| ContainerPort {
+            name: Some(port_name(p.host_port())),
+            container_port: i32::from(p.host_port()),
+            protocol: Some(protocol_str(&p.protocol).to_string()),
+            ..Default::default()
+        })
+        .collect();
+    (!ports.is_empty()).then_some(ports)
+}
+
+fn protocol_str(p: &msb_crd::sandbox::PortProtocol) -> &'static str {
+    match p {
+        msb_crd::sandbox::PortProtocol::Tcp => "TCP",
+        msb_crd::sandbox::PortProtocol::Udp => "UDP",
+    }
 }
 
 fn runtime_container(
@@ -180,6 +238,7 @@ fn runtime_container(
             },
         ]),
         volume_mounts: Some(mounts),
+        ports: published_container_ports(spec),
         resources: Some(runtime_resources(spec.cpus, spec.memory)),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
@@ -375,6 +434,22 @@ pub(crate) mod test_support {
             },
             status: None,
         }
+    }
+
+    /// A sandbox publishing the given ports (as `guestPort`, TCP, default bind).
+    pub fn sandbox_with_ports(ports: &[u16]) -> Sandbox {
+        use msb_crd::sandbox::PublishedPort;
+        let mut sb = sandbox();
+        sb.spec.network.published_ports = ports
+            .iter()
+            .map(|&g| PublishedPort {
+                guest_port: g,
+                host_port: None,
+                protocol: Default::default(),
+                host_bind: "0.0.0.0".to_string(),
+            })
+            .collect();
+        sb
     }
 
     /// A sandbox with two secrets: two keys from `creds`, one from `db`.
@@ -867,5 +942,35 @@ mod tests {
         assert_eq!(inits[0].restart_policy.as_deref(), Some("Always"));
         let names: Vec<_> = spec.containers.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["msb-runtime"]);
+    }
+
+    #[test]
+    fn published_ports_become_named_container_ports() {
+        let pod = build(&test_support::sandbox_with_ports(&[8000, 5432]), &config()).unwrap();
+        let ports = container(&pod, "msb-runtime").ports.as_ref().unwrap();
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].container_port, 8000);
+        assert_eq!(ports[0].name.as_deref(), Some("port-8000"));
+        assert_eq!(ports[1].container_port, 5432);
+        assert_eq!(ports[1].name.as_deref(), Some("port-5432"));
+    }
+
+    #[test]
+    fn no_published_ports_means_no_container_ports() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        assert!(container(&pod, "msb-runtime").ports.is_none());
+    }
+
+    #[test]
+    fn publishing_the_bridge_port_is_rejected() {
+        // config()'s bridge port is 7000.
+        let err = build(&test_support::sandbox_with_ports(&[7000]), &config()).unwrap_err();
+        assert!(matches!(err, PodBuildError::InvalidPorts { .. }));
+    }
+
+    #[test]
+    fn duplicate_published_ports_are_rejected() {
+        let err = build(&test_support::sandbox_with_ports(&[8000, 8000]), &config()).unwrap_err();
+        assert!(matches!(err, PodBuildError::InvalidPorts { .. }));
     }
 }

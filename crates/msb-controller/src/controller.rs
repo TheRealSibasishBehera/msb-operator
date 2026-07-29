@@ -285,6 +285,17 @@ async fn mark_running(
     let service_name = sandbox
         .namespace()
         .map(|ns| service::service_name(&ns, name));
+    let exposed_ports = sandbox
+        .spec
+        .network
+        .published_ports
+        .iter()
+        .map(|p| msb_crd::sandbox::ExposedPort {
+            port: p.host_port(),
+            protocol: p.protocol,
+            name: pod::port_name(p.host_port()),
+        })
+        .collect();
     let status = SandboxStatus {
         phase: Some(SandboxPhase::Running),
         pod_name: Some(pod.name_any()),
@@ -293,6 +304,7 @@ async fn mark_running(
         started_at: Some(now),
         // Preserve the retry count across the Pending→Running transition.
         restart_count: sandbox.status.as_ref().map(|s| s.restart_count).unwrap_or(0),
+        exposed_ports,
         conditions,
         ..Default::default()
     };
@@ -378,6 +390,7 @@ async fn terminate(
             termination_reason: reason.clone(),
             exit_code,
             restart_count: restart_count + 1,
+            exposed_ports: prior.map(|s| s.exposed_ports.clone()).unwrap_or_default(),
             conditions,
         }
     } else {
@@ -391,6 +404,7 @@ async fn terminate(
             termination_reason: reason.clone(),
             exit_code,
             restart_count,
+            exposed_ports: prior.map(|s| s.exposed_ports.clone()).unwrap_or_default(),
             conditions,
         }
     };
@@ -468,6 +482,7 @@ async fn handle_vanished_pod(
         termination_reason: Some(reason),
         exit_code: None,
         restart_count: if retrying { restart_count + 1 } else { restart_count },
+        exposed_ports: prior.map(|s| s.exposed_ports.clone()).unwrap_or_default(),
         conditions,
     };
     patch_status(sandboxes, name, &status).await?;

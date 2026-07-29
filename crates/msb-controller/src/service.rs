@@ -45,17 +45,40 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig, name: &str, namespace: &
         spec: Some(ServiceSpec {
             type_: Some("ClusterIP".to_string()),
             selector: Some(selector),
-            ports: Some(vec![ServicePort {
-                name: Some("agent".to_string()),
-                port: cfg.bridge_port,
-                target_port: Some(IntOrString::Int(cfg.bridge_port)),
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            }]),
+            ports: Some(service_ports(sandbox, cfg)),
             ..Default::default()
         }),
         status: None,
     }
+}
+
+/// The bridge port plus every published port. Callers are responsible for
+/// having rejected a published port that collides with the bridge port.
+fn service_ports(sandbox: &Sandbox, cfg: &ControllerConfig) -> Vec<ServicePort> {
+    let mut ports = vec![ServicePort {
+        name: Some("agent".to_string()),
+        port: cfg.bridge_port,
+        target_port: Some(IntOrString::Int(cfg.bridge_port)),
+        protocol: Some("TCP".to_string()),
+        ..Default::default()
+    }];
+    for p in &sandbox.spec.network.published_ports {
+        let host = i32::from(p.host_port());
+        ports.push(ServicePort {
+            name: Some(crate::pod::port_name(p.host_port())),
+            port: host,
+            target_port: Some(IntOrString::Int(host)),
+            protocol: Some(
+                match p.protocol {
+                    msb_crd::sandbox::PortProtocol::Tcp => "TCP",
+                    msb_crd::sandbox::PortProtocol::Udp => "UDP",
+                }
+                .to_string(),
+            ),
+            ..Default::default()
+        });
+    }
+    ports
 }
 
 #[cfg(test)]
@@ -100,5 +123,17 @@ mod tests {
         let owners = svc.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owners[0].kind, "Sandbox");
         assert_eq!(owners[0].controller, Some(true));
+    }
+
+    #[test]
+    fn published_ports_are_added_alongside_the_bridge_port() {
+        use crate::pod::test_support::{config, sandbox_with_ports};
+        let svc = build(&sandbox_with_ports(&[8000]), &config(), "my-sandbox", "team-a");
+        let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
+        assert_eq!(ports.len(), 2, "bridge + one published");
+        assert_eq!(ports[0].name.as_deref(), Some("agent"));
+        assert_eq!(ports[1].name.as_deref(), Some("port-8000"));
+        assert_eq!(ports[1].port, 8000);
+        assert_eq!(ports[1].target_port, Some(IntOrString::Int(8000)));
     }
 }

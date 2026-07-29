@@ -125,10 +125,24 @@ spec:
                     description: Guest ports to expose on the Pod IP.
                     items:
                       properties:
-                        containerPort:
+                        guestPort:
+                          description: Port the guest listens on.
                           format: uint16
                           maximum: 65535.0
                           minimum: 0.0
+                          type: integer
+                        hostBind:
+                          default: 0.0.0.0
+                          description: |-
+                            Pod-side bind address. Defaults to `0.0.0.0` so the port is reachable on
+                            the Pod IP (msb's own default is loopback, which is unreachable in a pod).
+                          type: string
+                        hostPort:
+                          description: Port exposed on the pod. Defaults to `guest_port`.
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          nullable: true
                           type: integer
                         protocol:
                           default: TCP
@@ -137,7 +151,7 @@ spec:
                           - UDP
                           type: string
                       required:
-                      - containerPort
+                      - guestPort
                       type: object
                     type: array
                   tls:
@@ -269,6 +283,33 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              exposedPorts:
+                description: |-
+                  Ports exposed on the per-sandbox Service, reflected so `kubectl describe`
+                  shows where a guest listener is reachable.
+                items:
+                  description: A port reachable on the per-sandbox Service.
+                  properties:
+                    name:
+                      description: The Service port name, referenceable by Ingress/Istio.
+                      type: string
+                    port:
+                      description: Port on the Service (and Pod).
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      type: integer
+                    protocol:
+                      enum:
+                      - TCP
+                      - UDP
+                      type: string
+                  required:
+                  - name
+                  - port
+                  - protocol
+                  type: object
+                type: array
               nodeName:
                 nullable: true
                 type: string

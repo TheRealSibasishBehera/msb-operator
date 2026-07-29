@@ -2,6 +2,8 @@
 //! builder. Without this the sandbox boots with no policy and no
 //! secret substitution — the SDK applies nothing we don't set here.
 
+use std::net::{IpAddr, Ipv4Addr};
+
 use microsandbox::NetworkPolicy;
 use microsandbox::sandbox::SandboxBuilder;
 use msb_crd::sandbox::{PolicyPreset, PortProtocol};
@@ -22,9 +24,11 @@ pub fn apply(
         n = n.enabled(net.enabled).policy(policy(&net.policy.preset));
 
         for p in &net.published_ports {
+            let bind: IpAddr = p.host_bind.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            let (host, guest) = (p.host_port(), p.guest_port);
             n = match p.protocol {
-                PortProtocol::Tcp => n.port(p.container_port, p.container_port),
-                PortProtocol::Udp => n.port_udp(p.container_port, p.container_port),
+                PortProtocol::Tcp => n.port_bind(bind, host, guest),
+                PortProtocol::Udp => n.port_udp_bind(bind, host, guest),
             };
         }
 
