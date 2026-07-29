@@ -10,7 +10,7 @@ use msb_crd::{Sandbox, SandboxPhase, SandboxSpec, SandboxStatus};
 use crate::error::GatewayError;
 
 /// Annotation prefix for wire fields with no CRD spec home (round-tripped for `get`).
-pub const CLOUD_ANN: &str = "microsandbox.io/cloud-";
+pub const CLOUD_ANN: &str = "microsandbox.dev/cloud-";
 
 /// Reject a name that isn't a valid k8s object name (SDK names are freer than ours).
 pub fn validate_name(name: &str) -> Result<(), GatewayError> {
@@ -245,10 +245,10 @@ mod tests {
         assert_eq!(spec.memory, 1024);
         assert_eq!(spec.cmd, vec!["sleep", "300"]);
         assert!(spec.ephemeral);
-        assert!(ann.contains_key("microsandbox.io/cloud-env"));
-        assert_eq!(ann.get("microsandbox.io/cloud-workdir").unwrap(), "/app");
-        assert_eq!(ann.get("microsandbox.io/cloud-max-duration-secs").unwrap(), "600");
-        assert!(!ann.contains_key("microsandbox.io/cloud-shell"));
+        assert!(ann.contains_key("microsandbox.dev/cloud-env"));
+        assert_eq!(ann.get("microsandbox.dev/cloud-workdir").unwrap(), "/app");
+        assert_eq!(ann.get("microsandbox.dev/cloud-max-duration-secs").unwrap(), "600");
+        assert!(!ann.contains_key("microsandbox.dev/cloud-shell"));
     }
 
     #[test]
@@ -276,7 +276,7 @@ mod tests {
         // A Sandbox created directly (no cloud-* annotations, no status): config
         // must still be fully populated so list/get decode.
         let sb = sandbox_from_json(serde_json::json!({
-            "apiVersion": "sandbox.microsandbox.io/v1alpha1",
+            "apiVersion": "sandbox.microsandbox.dev/v1alpha1",
             "kind": "Sandbox",
             "metadata": { "name": "raw-sb", "namespace": "team-a" },
             "spec": { "image": "alpine:3.20", "cpus": 1, "memory": 512, "cmd": [], "ephemeral": false },

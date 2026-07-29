@@ -27,7 +27,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig, name: &str, namespace: &
     let owner = sandbox.controller_owner_ref(&());
 
     let selector = BTreeMap::from([(
-        "microsandbox.io/sandbox-name".to_string(),
+        "microsandbox.dev/sandbox-name".to_string(),
         name.to_string(),
     )]);
 
@@ -90,7 +90,7 @@ mod tests {
         let spec = svc.spec.as_ref().unwrap();
         assert_eq!(spec.type_.as_deref(), Some("ClusterIP"));
         assert_eq!(
-            spec.selector.as_ref().unwrap().get("microsandbox.io/sandbox-name"),
+            spec.selector.as_ref().unwrap().get("microsandbox.dev/sandbox-name"),
             Some(&"my-sandbox".to_string())
         );
         let port = &spec.ports.as_ref().unwrap()[0];

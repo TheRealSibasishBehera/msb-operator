@@ -15,7 +15,7 @@ use kube::{Api, Client};
 
 use crate::error::GatewayError;
 
-const SANDBOX_GROUP: &str = "sandbox.microsandbox.io";
+const SANDBOX_GROUP: &str = "sandbox.microsandbox.dev";
 const SANDBOX_RESOURCE: &str = "sandboxes";
 
 /// An authenticated caller, with the namespace derived from the token (the SDK's

@@ -21,10 +21,10 @@ metadata:
   labels:
     {{- include "msb-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["sandbox.microsandbox.io"]
+  - apiGroups: ["sandbox.microsandbox.dev"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "delete"]
-  - apiGroups: ["sandbox.microsandbox.io"]
+  - apiGroups: ["sandbox.microsandbox.dev"]
     resources: ["sandboxes/status"]
     verbs: ["patch"]
   - apiGroups: [""]

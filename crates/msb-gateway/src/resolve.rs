@@ -68,7 +68,7 @@ mod tests {
         // Build via JSON so we don't have to spell out every required spec field;
         // resolution only reads `.status`, so a minimal valid spec suffices.
         let mut sb: Sandbox = serde_json::from_value(serde_json::json!({
-            "apiVersion": "sandbox.microsandbox.io/v1alpha1",
+            "apiVersion": "sandbox.microsandbox.dev/v1alpha1",
             "kind": "Sandbox",
             "metadata": { "name": "s1", "namespace": "ns" },
             "spec": { "image": "alpine:3.20" },

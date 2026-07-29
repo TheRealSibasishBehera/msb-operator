@@ -1,6 +1,6 @@
 # The sandbox boots a real microVM and the controller marks it Running with a
 # per-sandbox Service name recorded. kuttl polls until this matches (or times out).
-apiVersion: sandbox.microsandbox.io/v1alpha1
+apiVersion: sandbox.microsandbox.dev/v1alpha1
 kind: Sandbox
 metadata:
   name: e2e-boot

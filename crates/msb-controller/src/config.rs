@@ -8,8 +8,8 @@ use std::fmt;
 /// bridge — which dials the hashed path — cannot connect.
 pub const MSB_HOME_MAX_BYTES: usize = 59;
 
-pub const KVM_RESOURCE: &str = "devices.microsandbox.io/kvm";
-pub const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
+pub const KVM_RESOURCE: &str = "devices.microsandbox.dev/kvm";
+pub const SANDBOX_LABEL: &str = "microsandbox.dev/sandbox";
 pub const FIELD_MANAGER: &str = "msb-controller";
 
 // Runtime-container resource sizing. On top of the guest RAM the pod carries the

@@ -4,7 +4,7 @@ metadata:
   name: msb-controller
 rules:
 - apiGroups:
-  - sandbox.microsandbox.io
+  - sandbox.microsandbox.dev
   resources:
   - sandboxes
   verbs:
@@ -13,7 +13,7 @@ rules:
   - watch
   - delete
 - apiGroups:
-  - sandbox.microsandbox.io
+  - sandbox.microsandbox.dev
   resources:
   - sandboxes/status
   verbs:

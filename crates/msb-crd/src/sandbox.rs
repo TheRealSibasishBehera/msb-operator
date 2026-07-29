@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 // The API server enforces this server-side; the controller never needs to check.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "sandbox.microsandbox.io",
+    group = "sandbox.microsandbox.dev",
     version = "v1alpha1",
     kind = "Sandbox",
     namespaced,
