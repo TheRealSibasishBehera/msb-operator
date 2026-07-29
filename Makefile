@@ -14,10 +14,29 @@ E2E_SA      ?= sdk-e2e-client
 
 SUITE ?= unit
 
+# Every operator image is docker/<name>/Dockerfile, built the same way.
+IMAGES := msb-controller msb-daemon msb-bridge msb-gateway msb-runtime sdk-gateway-e2e
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_%-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
+
+# --- build ---------------------------------------------------------------------
+
+.PHONY: build
+build: ## Build all workspace binaries (release)
+	cargo build --release --workspace
+
+image: $(addprefix image-,$(IMAGES)) ## Build all operator images
+
+image-%: ## Build one image: docker/<name>/Dockerfile -> $(IMAGE_REGISTRY)/<name>:$(VERSION)
+	docker build -t $(IMAGE_REGISTRY)/$*:$(VERSION) -f docker/$*/Dockerfile .
+
+cluster-load-%: image-% ## Build + load one image into the cluster
+	$(CLUSTER_LOAD) $(IMAGE_REGISTRY)/$*:$(VERSION)
+
+# --- test ----------------------------------------------------------------------
 
 .PHONY: test
 test: test-$(SUITE) ## Run a test suite: make test SUITE=unit|e2e|e2e-sdk
@@ -31,7 +50,7 @@ test-e2e: ## KVM kuttl suite (needs KUBECONFIG at a KVM cluster)
 	tests/e2e/run.sh
 
 .PHONY: test-e2e-sdk
-test-e2e-sdk: cluster-load-sdk-gateway ## e2e via the unmodified SDK + gateway, in-cluster
+test-e2e-sdk: cluster-load-sdk-gateway-e2e ## e2e via the unmodified SDK + gateway, in-cluster
 	kubectl -n $(GATEWAY_NS) delete pod sdk-gateway-e2e --ignore-not-found
 	kubectl -n $(GATEWAY_NS) run sdk-gateway-e2e \
 		--image=$(IMAGE_REGISTRY)/sdk-gateway-e2e:$(VERSION) --image-pull-policy=IfNotPresent \
@@ -39,9 +58,3 @@ test-e2e-sdk: cluster-load-sdk-gateway ## e2e via the unmodified SDK + gateway, 
 		--overrides='{"spec":{"serviceAccountName":"$(E2E_SA)"}}' \
 		--env=MSB_API_URL=$(GATEWAY_URL) \
 		--env=MSB_API_KEY=$$(kubectl -n $(GATEWAY_NS) create token $(E2E_SA) --duration=1h)
-
-image-%: ## Build the image for suite %  (docker/%-e2e.Dockerfile)
-	docker build -t $(IMAGE_REGISTRY)/$*-e2e:$(VERSION) -f docker/$*-e2e.Dockerfile .
-
-cluster-load-%: image-% ## Build + load suite %'s image into the cluster
-	$(CLUSTER_LOAD) $(IMAGE_REGISTRY)/$*-e2e:$(VERSION)
