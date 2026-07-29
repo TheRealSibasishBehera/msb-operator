@@ -112,13 +112,12 @@ sandbox:
   # -- RUST_LOG for sandbox runtime containers (boot-phase debugging).
   runtimeLog: info
 
-# Let the chart create its own namespace, labelled `enforce: privileged`. The
-# daemon mounts hostPath (device-plugin socket + /dev/kvm), which both
-# `restricted` and `baseline` forbid — only `privileged` permits it, same as
-# KubeVirt and Virtink. Leave false when the namespace is pre-created — but then
-# it must permit hostPath (privileged), or the daemon pod is rejected.
-# -- Create the operator namespace with a privileged Pod Security label.
-createNamespace: false
+# The operator namespace must carry `pod-security.kubernetes.io/enforce:
+# privileged` because the daemon mounts hostPath (device-plugin socket +
+# /dev/kvm), which restricted/baseline forbid. Helm cannot create its own
+# release namespace, so apply deploy/namespace.yaml first (or use
+# `helm install --create-namespace` then label it). Sandbox pods run in their
+# own namespaces at restricted — they need no privilege.
 
 # Install the Sandbox CRD with the chart. Set false if the CRD is managed
 # out-of-band (e.g. applied separately in a GitOps flow).

@@ -12,12 +12,14 @@ Check rollout:
   kubectl -n {{ .Release.Namespace }} get ds msb-daemon
   kubectl get node -o jsonpath='{.items[*].status.allocatable.devices\.microsandbox\.dev/kvm}'
 
-Create a sandbox:
+Create a sandbox (in any namespace — sandbox pods run at PodSecurity
+`restricted`, so unprivileged tenant namespaces work):
   cat <<EOF | kubectl apply -f -
   apiVersion: sandbox.microsandbox.dev/v1alpha1
   kind: Sandbox
   metadata:
     name: hello
+    namespace: {{ .Release.Namespace }}
   spec:
     image: alpine:3.20
     cpus: 1
@@ -26,4 +28,4 @@ Create a sandbox:
     runPolicy: Once
   EOF
 
-  kubectl get sandbox hello -w
+  kubectl -n {{ .Release.Namespace }} get sandbox hello -w
