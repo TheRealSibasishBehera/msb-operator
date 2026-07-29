@@ -4,17 +4,17 @@ Components:
   - msb-controller  Deployment ({{ .Values.controller.replicas }} replicas, leader-elected)
   - msb-daemon      DaemonSet  (KVM device plugin, one per node)
 {{- if .Values.installCRD }}
-  - Sandbox CRD     sandboxes.sandbox.microsandbox.io
+  - Sandbox CRD     sandboxes.sandbox.microsandbox.dev
 {{- end }}
 
 Check rollout:
   kubectl -n {{ .Release.Namespace }} rollout status deploy/msb-controller
   kubectl -n {{ .Release.Namespace }} get ds msb-daemon
-  kubectl get node -o jsonpath='{.items[*].status.allocatable.devices\.microsandbox\.io/kvm}'
+  kubectl get node -o jsonpath='{.items[*].status.allocatable.devices\.microsandbox\.dev/kvm}'
 
 Create a sandbox:
   cat <<EOF | kubectl apply -f -
-  apiVersion: sandbox.microsandbox.io/v1alpha1
+  apiVersion: sandbox.microsandbox.dev/v1alpha1
   kind: Sandbox
   metadata:
     name: hello

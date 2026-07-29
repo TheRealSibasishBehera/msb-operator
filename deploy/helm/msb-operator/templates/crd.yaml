@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     "helm.sh/resource-policy": keep
-  name: sandboxes.sandbox.microsandbox.io
+  name: sandboxes.sandbox.microsandbox.dev
 spec:
-  group: sandbox.microsandbox.io
+  group: sandbox.microsandbox.dev
   names:
     categories: []
     kind: Sandbox

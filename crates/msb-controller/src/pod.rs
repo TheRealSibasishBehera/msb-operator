@@ -89,7 +89,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
 
     let labels = BTreeMap::from([
         (SANDBOX_LABEL.to_string(), "true".to_string()),
-        ("microsandbox.io/sandbox-name".to_string(), name.clone()),
+        ("microsandbox.dev/sandbox-name".to_string(), name.clone()),
     ]);
 
     Ok(Pod {

@@ -17,14 +17,14 @@ command -v kubectl-kuttl >/dev/null || command -v kuttl >/dev/null \
 
 kubectl cluster-info >/dev/null 2>&1 || fail "cannot reach the cluster (check KUBECONFIG)"
 
-kvm=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.devices\.microsandbox\.io/kvm}{"\n"}{end}' 2>/dev/null | grep -vE '^$|^0$' | head -1 || true)
-[ -n "$kvm" ] || fail "no node advertises devices.microsandbox.io/kvm — is the daemon installed and /dev/kvm present?"
+kvm=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.devices\.microsandbox\.dev/kvm}{"\n"}{end}' 2>/dev/null | grep -vE '^$|^0$' | head -1 || true)
+[ -n "$kvm" ] || fail "no node advertises devices.microsandbox.dev/kvm — is the daemon installed and /dev/kvm present?"
 echo "  KVM advertised: $kvm"
 
 kubectl get deploy -A 2>/dev/null | grep -q msb-controller || fail "msb-controller Deployment not found — install the operator first"
 echo "  operator: found msb-controller"
 
-kubectl get crd sandboxes.sandbox.microsandbox.io >/dev/null 2>&1 || fail "Sandbox CRD not installed"
+kubectl get crd sandboxes.sandbox.microsandbox.dev >/dev/null 2>&1 || fail "Sandbox CRD not installed"
 echo "  CRD: installed"
 
 echo "== running e2e suite (kuttl) =="

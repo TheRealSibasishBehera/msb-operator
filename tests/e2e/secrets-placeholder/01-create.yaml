@@ -1,4 +1,4 @@
-apiVersion: sandbox.microsandbox.io/v1alpha1
+apiVersion: sandbox.microsandbox.dev/v1alpha1
 kind: Sandbox
 metadata:
   name: e2e-sec-ok

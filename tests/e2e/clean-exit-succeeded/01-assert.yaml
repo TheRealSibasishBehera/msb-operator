@@ -2,7 +2,7 @@
 # runtime container's terminated state and settles the sandbox terminal-Succeeded
 # with a Completed reason. (msb reports exit 0 on a clean VM shutdown — this is
 # the happy path, not the failed-command V1 limitation.)
-apiVersion: sandbox.microsandbox.io/v1alpha1
+apiVersion: sandbox.microsandbox.dev/v1alpha1
 kind: Sandbox
 metadata:
   name: e2e-clean

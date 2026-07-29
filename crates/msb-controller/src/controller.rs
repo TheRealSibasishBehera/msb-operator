@@ -37,8 +37,8 @@ fn prior_conditions(sandbox: &Sandbox) -> Vec<SandboxCondition> {
 }
 
 /// Written by the daemon on sandbox exit; read at the `terminate` call site.
-pub const ANN_TERMINATION_REASON: &str = "microsandbox.io/termination-reason";
-pub const ANN_TERMINATED_AT: &str = "microsandbox.io/terminated-at";
+pub const ANN_TERMINATION_REASON: &str = "microsandbox.dev/termination-reason";
+pub const ANN_TERMINATED_AT: &str = "microsandbox.dev/terminated-at";
 
 // Fallback re-check cadence while a pod is Pending. The `.owns(pods)` watch
 // normally reconciles the instant the pod flips Running; this only backstops a

@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::{marker, pull};
 
-const SANDBOX_LABEL: &str = "microsandbox.io/sandbox";
+const SANDBOX_LABEL: &str = "microsandbox.dev/sandbox";
 const RUNTIME_CONTAINER: &str = "msb-runtime";
 const SPEC_ENV: &str = "MSB_SANDBOX_SPEC";
 

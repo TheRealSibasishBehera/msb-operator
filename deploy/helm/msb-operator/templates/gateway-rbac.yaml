@@ -26,7 +26,7 @@ metadata:
     {{- include "msb-operator.labels" . | nindent 4 }}
 rules:
   # (b) lifecycle + exec-resolve: create/get/list/delete sandboxes.
-  - apiGroups: ["sandbox.microsandbox.io"]
+  - apiGroups: ["sandbox.microsandbox.dev"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "create", "delete"]
   # (a) authenticate the caller's Bearer token.

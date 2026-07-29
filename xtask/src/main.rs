@@ -37,13 +37,13 @@ fn controller_policy_rules() -> Vec<PolicyRule> {
     vec![
         // Sandboxes: watched by the Controller, read and deleted on reconcile.
         rule(
-            &["sandbox.microsandbox.io"],
+            &["sandbox.microsandbox.dev"],
             &["sandboxes"],
             &["get", "list", "watch", "delete"],
         ),
         // Status subresource: only ever patch_status'd, never GET separately.
         rule(
-            &["sandbox.microsandbox.io"],
+            &["sandbox.microsandbox.dev"],
             &["sandboxes/status"],
             &["patch"],
         ),

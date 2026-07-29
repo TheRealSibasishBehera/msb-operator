@@ -18,7 +18,7 @@ use crate::pb::{
     registration_client::RegistrationClient,
 };
 
-const RESOURCE_NAME: &str = "devices.microsandbox.io/kvm";
+const RESOURCE_NAME: &str = "devices.microsandbox.dev/kvm";
 
 /// Must be `/msb/cache` so the VMDK's baked absolute extents resolve.
 const CACHE_MOUNT: &str = "/msb/cache";
