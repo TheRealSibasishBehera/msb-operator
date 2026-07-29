@@ -1,0 +1,8 @@
+# The sandbox boots and the controller marks it Running. kuttl polls until this
+# matches (or times out).
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-ports
+status:
+  phase: Running

@@ -1,0 +1,29 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # The guest HTTP server is reachable through the Service DNS from another pod —
+  # the property the whole feature exists for. A restricted curl pod fetches the
+  # directory listing and must get HTTP 200.
+  - script: |
+      set -e
+      svc=$(kubectl get sandbox e2e-ports -n "$NAMESPACE" -o jsonpath='{.status.serviceName}')
+      url="http://${svc}.${NAMESPACE}.svc:8000/"
+      kubectl delete pod e2e-ports-curl -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+      kubectl run e2e-ports-curl -n "$NAMESPACE" --restart=Never \
+        --image=curlimages/curl:8.10.1 \
+        --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"c","image":"curlimages/curl:8.10.1","args":["-s","-m","15","--retry","5","--retry-connrefused","-o","/dev/null","-w","%{http_code}","'"$url"'"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+        >/dev/null 2>&1
+      kubectl wait --for=condition=Ready pod/e2e-ports-curl -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1 || true
+      # Wait for the curl container to finish, then read its exit + captured code.
+      for i in $(seq 1 30); do
+        phase=$(kubectl get pod e2e-ports-curl -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
+        [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ] && break
+        sleep 2
+      done
+      code=$(kubectl logs e2e-ports-curl -n "$NAMESPACE" 2>/dev/null)
+      kubectl delete pod e2e-ports-curl -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+      if [ "$code" = "200" ]; then
+        echo "PASS: guest HTTP server reachable through Service ($url -> 200)"
+      else
+        echo "FAIL: expected HTTP 200 through Service, got '$code' ($url)"; exit 1
+      fi

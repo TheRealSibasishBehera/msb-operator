@@ -1,0 +1,16 @@
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-ports
+spec:
+  # A guest HTTP server on :8000, published so it is reachable through the
+  # per-sandbox Service. The daemon pulls python:3.12 on-demand.
+  image: "python:3.12"
+  cpus: 1
+  memory: 512
+  cmd: ["python3", "-m", "http.server", "8000"]
+  ephemeral: false
+  runPolicy: Once
+  network:
+    publishedPorts:
+      - guestPort: 8000
