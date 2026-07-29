@@ -214,13 +214,34 @@ pub struct InterceptedPort {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedPort {
-    pub container_port: u16,
+    /// Port the guest listens on.
+    pub guest_port: u16,
+
+    /// Port exposed on the pod. Defaults to `guest_port`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<u16>,
 
     #[serde(default)]
     pub protocol: PortProtocol,
+
+    /// Pod-side bind address. Defaults to `0.0.0.0` so the port is reachable on
+    /// the Pod IP (msb's own default is loopback, which is unreachable in a pod).
+    #[serde(default = "default_host_bind")]
+    pub host_bind: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+fn default_host_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
+impl PublishedPort {
+    /// The pod-side port, defaulting to the guest port.
+    pub fn host_port(&self) -> u16 {
+        self.host_port.unwrap_or(self.guest_port)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PortProtocol {
     #[default]
@@ -323,8 +344,24 @@ pub struct SandboxStatus {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub restart_count: u32,
 
+    /// Ports exposed on the per-sandbox Service, reflected so `kubectl describe`
+    /// shows where a guest listener is reachable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed_ports: Vec<ExposedPort>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<SandboxCondition>,
+}
+
+/// A port reachable on the per-sandbox Service.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExposedPort {
+    /// Port on the Service (and Pod).
+    pub port: u16,
+    pub protocol: PortProtocol,
+    /// The Service port name, referenceable by Ingress/Istio.
+    pub name: String,
 }
 
 /// A status condition, mirroring `metav1.Condition`. schemars-derived because
