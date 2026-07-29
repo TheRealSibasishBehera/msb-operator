@@ -44,9 +44,6 @@ pub enum ConfigError {
 #[derive(Debug, Clone)]
 pub struct ControllerConfig {
     msb_home: String,
-    /// GID of `/dev/kvm` on the node. Not standardised — Ubuntu assigns it
-    /// dynamically, so it is a deployment-time value, not a constant.
-    pub kvm_gid: i64,
     pub runtime_image: String,
     pub bridge_image: String,
     pub bridge_port: i32,
@@ -57,7 +54,6 @@ pub struct ControllerConfig {
 impl ControllerConfig {
     pub fn new(
         msb_home: impl Into<String>,
-        kvm_gid: i64,
         runtime_image: impl Into<String>,
         bridge_image: impl Into<String>,
         bridge_port: i32,
@@ -76,7 +72,6 @@ impl ControllerConfig {
 
         Ok(Self {
             msb_home,
-            kvm_gid,
             runtime_image: runtime_image.into(),
             bridge_image: bridge_image.into(),
             bridge_port,
@@ -98,7 +93,7 @@ impl ControllerConfig {
 
 impl fmt::Display for ControllerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "msb_home={} kvm_gid={}", self.msb_home, self.kvm_gid)
+        write!(f, "msb_home={}", self.msb_home)
     }
 }
 
@@ -107,7 +102,7 @@ mod tests {
     use super::*;
 
     fn config_with_home(home: &str) -> Result<ControllerConfig, ConfigError> {
-        ControllerConfig::new(home, 104, "runtime:dev", "bridge:dev", 7000)
+        ControllerConfig::new(home, "runtime:dev", "bridge:dev", 7000)
     }
 
     #[test]

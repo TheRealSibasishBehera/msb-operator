@@ -37,8 +37,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: MSB_KVM_GID
-              value: {{ required "kvmGid is required: find it with `stat -c '%g' /dev/kvm` on a node and pass --set kvmGid=<gid>" .Values.kvmGid | quote }}
             - name: MSB_HOME
               value: {{ .Values.msbHome | quote }}
             - name: MSB_BRIDGE_PORT

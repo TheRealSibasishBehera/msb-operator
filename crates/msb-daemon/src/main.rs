@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::DevicePlugin(args) => {
             info!(kvm = %args.kvm_path.display(), node = %args.node_name, "starting daemon");
+            open_kvm_for_all(&args.kvm_path).context("relaxing /dev/kvm permissions")?;
             let health_rx = health::watch_path(args.kvm_path)
                 .await
                 .context("initialising health watcher")?;
@@ -93,4 +94,27 @@ async fn main() -> anyhow::Result<()> {
                 .context("pulling image")
         }
     }
+}
+
+/// `chmod o+rw /dev/kvm` so non-root pods can open it without the node's kvm GID.
+fn open_kvm_for_all(kvm_path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = std::fs::metadata(kvm_path)
+        .with_context(|| format!("stat {}", kvm_path.display()))?;
+    let mode = meta.permissions().mode();
+    let relaxed = mode | 0o006;
+    if relaxed == mode {
+        info!(kvm = %kvm_path.display(), mode = format!("{:o}", mode & 0o7777), "already world-rw");
+        return Ok(());
+    }
+    std::fs::set_permissions(kvm_path, std::fs::Permissions::from_mode(relaxed))
+        .with_context(|| format!("chmod o+rw {}", kvm_path.display()))?;
+    info!(
+        kvm = %kvm_path.display(),
+        from = format!("{:o}", mode & 0o7777),
+        to = format!("{:o}", relaxed & 0o7777),
+        "relaxed /dev/kvm to world-rw"
+    );
+    Ok(())
 }

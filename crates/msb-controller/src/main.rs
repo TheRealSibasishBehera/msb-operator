@@ -30,10 +30,6 @@ struct Cli {
     #[arg(long, default_value = "/msb", env = "MSB_HOME")]
     msb_home: String,
 
-    /// GID of /dev/kvm on the node. Not standardised; Ubuntu assigns it dynamically.
-    #[arg(long, env = "MSB_KVM_GID")]
-    kvm_gid: i64,
-
     #[arg(long, env = "MSB_RUNTIME_IMAGE")]
     runtime_image: String,
 
@@ -67,7 +63,6 @@ async fn main() -> anyhow::Result<()> {
 
     let config = ControllerConfig::new(
         cli.msb_home,
-        cli.kvm_gid,
         cli.runtime_image,
         cli.bridge_image,
         cli.bridge_port,

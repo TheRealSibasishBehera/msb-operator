@@ -114,9 +114,6 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
                 run_as_user: Some(RUN_AS_USER),
-                // The device plugin handles the cgroup allowlist but not Unix DAC;
-                // /dev/kvm is crw-rw---- root:kvm, so the process must be in the group.
-                supplemental_groups: Some(vec![cfg.kvm_gid]),
                 // The KVM ioctls the runtime needs are not blocked by the
                 // runtime's default seccomp profile.
                 seccomp_profile: Some(SeccompProfile {
@@ -406,7 +403,6 @@ pub(crate) mod test_support {
         ControllerConfig::new(
             // MSB_HOME must be /msb so the cache's absolute VMDK paths resolve.
             "/msb",
-            104,
             "ghcr.io/msb/runtime:dev",
             "ghcr.io/msb/bridge:dev",
             7000,
@@ -595,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_non_root_in_the_kvm_group() {
+    fn runs_non_root_without_kvm_supplemental_group() {
         let pod = build(&sandbox(), &config()).unwrap();
         let sc = pod
             .spec
@@ -606,7 +602,7 @@ mod tests {
             .unwrap();
         assert_eq!(sc.run_as_non_root, Some(true));
         assert_eq!(sc.run_as_user, Some(1000));
-        assert_eq!(sc.supplemental_groups, Some(vec![104]));
+        assert_eq!(sc.supplemental_groups, None);
     }
 
     #[test]

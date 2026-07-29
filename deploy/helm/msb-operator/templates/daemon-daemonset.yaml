@@ -47,7 +47,6 @@ spec:
             # kubelet from creating /dev/termination-log inside the container.
             - name: kvm
               mountPath: {{ .Values.daemon.kvmPath | quote }}
-              readOnly: true
             # msb pull runs with MSB_HOME=/msb; the host cache dir is mounted at
             # /msb/cache so writes land in the cache the daemon injects into pods.
             - name: msb-home
@@ -58,11 +57,12 @@ spec:
             allowPrivilegeEscalation: false
             # msb pull writes to /msb (mounted volumes), never the container rootfs.
             readOnlyRootFilesystem: true
-            # Root is needed to bind the device-plugin socket under
-            # /var/lib/kubelet; it only reads /dev/kvm, and drops all caps.
+            # Root binds the device-plugin socket under /var/lib/kubelet; FOWNER
+            # lets it chmod o+rw /dev/kvm so non-root sandbox pods can open it.
             runAsNonRoot: false
             capabilities:
               drop: ["ALL"]
+              add: ["FOWNER"]
       volumes:
         - name: device-plugin-dir
           hostPath:

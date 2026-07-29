@@ -9,13 +9,6 @@ imagePullPolicy: IfNotPresent
 # -- Image pull secrets, referenced by name, for a private registry.
 imagePullSecrets: []
 
-# GID of /dev/kvm on the nodes. REQUIRED and node-dependent: Ubuntu 24.04
-# assigns it dynamically, so there is no safe default. Find it with
-# `stat -c '%g' /dev/kvm` on a node, and pin it with a udev rule
-# (KERNEL=="kvm", GROUP="kvm", MODE="0660") so it is stable across reboots.
-# -- GID of /dev/kvm on the nodes (required; `helm install --set kvmGid=<gid>`).
-kvmGid: ""
-
 # msb home inside sandbox pods. Must be /msb: the cache's baked VMDK holds
 # absolute paths under /msb/cache, so build and runtime must match.
 # -- msb home path inside sandbox pods (must be /msb).
