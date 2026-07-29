@@ -10,6 +10,7 @@ use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client};
+use msb_crd::SandboxSpec;
 use tracing::{info, warn};
 
 use crate::{marker, pull};
@@ -78,8 +79,8 @@ fn pod_image(pod: &Pod) -> Option<String> {
         .find(|e| e.name == SPEC_ENV)?
         .value
         .as_ref()?;
-    let spec: serde_json::Value = serde_json::from_str(spec_json).ok()?;
-    spec.get("image")?.as_str().map(str::to_owned)
+    let spec: SandboxSpec = serde_json::from_str(spec_json).ok()?;
+    Some(spec.image)
 }
 
 #[cfg(test)]
