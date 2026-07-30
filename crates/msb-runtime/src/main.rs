@@ -115,6 +115,14 @@ async fn main() -> Result<()> {
         builder = builder.persistent_initial_command(spec.cmd.clone());
     }
 
+    // The VM launcher enforces these, so no controller-side deadline is needed.
+    if let Some(secs) = spec.max_duration_secs {
+        builder = builder.max_duration(secs);
+    }
+    if let Some(secs) = spec.idle_timeout_secs {
+        builder = builder.idle_timeout(secs);
+    }
+
     // Apply the network policy and secret substitution; without this the guest
     // boots with neither.
     builder = net::apply(builder, &spec, &secrets);

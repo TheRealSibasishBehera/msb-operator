@@ -426,6 +426,8 @@ pub(crate) mod test_support {
                 memory: 1024,
                 cmd: vec!["python".to_string(), "script.py".to_string()],
                 ephemeral: true,
+                max_duration_secs: None,
+                idle_timeout_secs: None,
                 run_policy: Default::default(),
                 secrets: Vec::new(),
                 network: Default::default(),
@@ -762,6 +764,20 @@ mod tests {
             env_of(rt, "MSB_SANDBOX_NAME"),
             Some("team-a__my-sandbox".to_string())
         );
+    }
+
+    #[test]
+    fn lifecycle_fields_survive_the_spec_env_round_trip() {
+        // Regression: the controller must carry maxDurationSecs/idleTimeoutSecs
+        // into MSB_SANDBOX_SPEC, or the runtime never asks msb to enforce them.
+        let mut sb = sandbox();
+        sb.spec.max_duration_secs = Some(30);
+        sb.spec.idle_timeout_secs = Some(15);
+        let pod = build(&sb, &config()).unwrap();
+        let encoded = env_of(container(&pod, "msb-runtime"), "MSB_SANDBOX_SPEC").unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded["maxDurationSecs"], 30);
+        assert_eq!(decoded["idleTimeoutSecs"], 15);
     }
 
     #[test]

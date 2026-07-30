@@ -57,9 +57,21 @@ spec:
                 default: false
                 description: Whether to delete the Sandbox CRD after the sandbox exits.
                 type: boolean
+              idleTimeoutSecs:
+                description: Stop the sandbox after this many seconds with no activity.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
               image:
                 description: OCI image for the guest root filesystem.
                 type: string
+              maxDurationSecs:
+                description: Hard cap on total sandbox lifetime, in seconds.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
               memory:
                 default: 512
                 description: Memory in MiB.
