@@ -42,6 +42,14 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub ephemeral: bool,
 
+    /// Hard cap on total sandbox lifetime, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_duration_secs: Option<u64>,
+
+    /// Stop the sandbox after this many seconds with no activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u64>,
+
     /// Restart policy on failure.
     #[serde(default)]
     pub run_policy: RunPolicy,
@@ -447,6 +455,8 @@ mod tests {
             memory: default_memory_mib(),
             cmd: vec![],
             ephemeral: false,
+            max_duration_secs: None,
+            idle_timeout_secs: None,
             run_policy: RunPolicy::Once,
             secrets: vec![],
             network: NetworkSpec::default(),

@@ -49,6 +49,8 @@ pub fn request_to_spec(
         memory: req.memory_mib,
         cmd: req.entrypoint.clone().unwrap_or_default(),
         ephemeral: req.ephemeral,
+        max_duration_secs: req.max_duration_secs,
+        idle_timeout_secs: req.idle_timeout_secs,
         run_policy: Default::default(),
         secrets: Vec::new(),
         network: Default::default(),
@@ -72,12 +74,6 @@ pub fn request_to_spec(
         if let Ok(j) = serde_json::to_string(&req.scripts) {
             ann.insert(format!("{CLOUD_ANN}scripts"), j);
         }
-    }
-    if let Some(d) = req.max_duration_secs {
-        ann.insert(format!("{CLOUD_ANN}max-duration-secs"), d.to_string());
-    }
-    if let Some(d) = req.idle_timeout_secs {
-        ann.insert(format!("{CLOUD_ANN}idle-timeout-secs"), d.to_string());
     }
     Ok((spec, ann))
 }
@@ -168,8 +164,8 @@ fn reconstruct_config(sb: &Sandbox, _status: &SandboxStatus) -> CloudCreateSandb
         user: get("user"),
         log_level: get("log-level"),
         scripts,
-        max_duration_secs: get("max-duration-secs").and_then(|s| s.parse().ok()),
-        idle_timeout_secs: get("idle-timeout-secs").and_then(|s| s.parse().ok()),
+        max_duration_secs: sb.spec.max_duration_secs,
+        idle_timeout_secs: sb.spec.idle_timeout_secs,
     }
 }
 
@@ -245,9 +241,10 @@ mod tests {
         assert_eq!(spec.memory, 1024);
         assert_eq!(spec.cmd, vec!["sleep", "300"]);
         assert!(spec.ephemeral);
+        assert_eq!(spec.max_duration_secs, Some(600));
+        assert!(!ann.contains_key("microsandbox.dev/cloud-max-duration-secs"));
         assert!(ann.contains_key("microsandbox.dev/cloud-env"));
         assert_eq!(ann.get("microsandbox.dev/cloud-workdir").unwrap(), "/app");
-        assert_eq!(ann.get("microsandbox.dev/cloud-max-duration-secs").unwrap(), "600");
         assert!(!ann.contains_key("microsandbox.dev/cloud-shell"));
     }
 
