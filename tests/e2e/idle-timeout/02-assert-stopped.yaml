@@ -1,0 +1,8 @@
+# msb stops the idle guest at idleTimeoutSecs; a clean shutdown settles Succeeded.
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-idle
+status:
+  phase: Succeeded
+  terminationReason: Completed
