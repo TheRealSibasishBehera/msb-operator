@@ -1,0 +1,8 @@
+# msb stops it at the deadline; a clean shutdown settles Succeeded/Completed.
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-maxdur
+status:
+  phase: Succeeded
+  terminationReason: Completed
