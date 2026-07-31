@@ -1,7 +1,7 @@
 //! The lifecycle REST handlers: get / list / delete / stop / start. Each auths,
 //! performs the CRD op, and maps to the cloud wire type.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -9,6 +9,7 @@ use kube::api::{DeleteParams, ListParams};
 use kube::Api;
 use microsandbox_types::{CloudMessageResponse, CloudPaginated};
 use msb_crd::Sandbox;
+use serde::Deserialize;
 
 use crate::auth::{self, Identity};
 use crate::error::GatewayError;
@@ -56,13 +57,29 @@ pub async fn get(
     }
 }
 
-/// `GET /v1/sandboxes` — every item must map cleanly or the SDK's page decode fails.
-pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    pub labels: Option<String>,
+}
+
+/// `GET /v1/sandboxes[?labels=...]` — every item must map cleanly or the SDK's page
+/// decode fails. A `labels` filter is honored as a k8s label selector.
+pub async fn list(
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+    headers: HeaderMap,
+) -> Response {
     let id = match authed(&state, &headers, "list", None).await {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    match api(&state, &id.namespace).list(&ListParams::default()).await {
+    let mut params = ListParams::default();
+    match convert::labels_query_to_selector(q.labels.as_deref()) {
+        Ok(Some(sel)) => params = params.labels(&sel),
+        Ok(None) => {}
+        Err(e) => return e.into_response(),
+    }
+    match api(&state, &id.namespace).list(&params).await {
         Ok(list) => {
             let data = list
                 .items

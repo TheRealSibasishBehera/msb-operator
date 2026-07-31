@@ -14,6 +14,14 @@ use crate::error::GatewayError;
 /// Annotation prefix for wire fields with no CRD spec home (round-tripped for `get`).
 pub const CLOUD_ANN: &str = "microsandbox.dev/cloud-";
 
+/// Annotation prefix for msb labels that aren't valid k8s labels (preserved, not selectable).
+pub const CLOUD_LABEL_ANN: &str = "microsandbox.dev/cloud-label.";
+
+/// Marks a Sandbox as gateway-created. msb reserves the `sandbox.`/`microsandbox.`
+/// key prefixes, so a client can never set (and thus never shadow) this.
+pub const MANAGED_BY_KEY: &str = "sandbox.microsandbox.dev/managed-by";
+pub const MANAGED_BY_VALUE: &str = "msb-gateway";
+
 /// Reject a name that isn't a valid k8s object name (SDK names are freer than ours).
 pub fn validate_name(name: &str) -> Result<(), GatewayError> {
     let ok = !name.is_empty()
@@ -38,11 +46,46 @@ pub fn validate_name(name: &str) -> Result<(), GatewayError> {
     }
 }
 
-/// Cloud create request -> CRD spec + annotations for fields the spec can't hold.
-/// `env` is stashed for echo only, NOT injected into the guest (a V1 limitation).
-pub fn request_to_spec(
-    req: &CloudCreateSandboxRequest,
-) -> Result<(SandboxSpec, BTreeMap<String, String>), GatewayError> {
+/// A k8s label key: an optional `<dns-subdomain>/` prefix then a ≤63-char name
+/// segment bounded by alphanumerics with interior `-_.`.
+fn is_k8s_label_key(key: &str) -> bool {
+    let name = match key.split_once('/') {
+        Some((prefix, name)) => {
+            if prefix.is_empty() || prefix.len() > 253 {
+                return false;
+            }
+            name
+        }
+        None => key,
+    };
+    is_k8s_label_segment(name)
+}
+
+/// A k8s label value or name segment: empty, or ≤63 chars bounded by alphanumerics
+/// with interior `-_.`.
+fn is_k8s_label_segment(v: &str) -> bool {
+    if v.is_empty() {
+        return true;
+    }
+    v.len() <= 63
+        && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && v.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && v.bytes().last().is_some_and(|b| b.is_ascii_alphanumeric())
+}
+
+/// The CRD object a create request maps to: its spec plus the `metadata.labels`
+/// and `metadata.annotations` that carry the wire fields with no spec home.
+pub struct SpecMapping {
+    pub spec: SandboxSpec,
+    pub labels: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
+}
+
+/// Cloud create request -> CRD spec, k8s labels, and annotations for fields with no
+/// spec home. `env` is stashed for echo only, NOT injected into the guest (a V1
+/// limitation). Labels that are valid k8s labels become selectable `metadata.labels`;
+/// the rest (msb labels are free-form) are preserved as `cloud-label.*` annotations.
+pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, GatewayError> {
     let spec = &req.spec;
     validate_name(&spec.name)?;
 
@@ -92,7 +135,44 @@ pub fn request_to_spec(
             ann.insert(format!("{CLOUD_ANN}scripts"), j);
         }
     }
-    Ok((sandbox_spec, ann))
+
+    let mut labels = BTreeMap::new();
+    for (k, v) in &spec.labels {
+        if is_k8s_label_key(k) && is_k8s_label_segment(v) {
+            labels.insert(k.clone(), v.clone());
+        } else {
+            ann.insert(format!("{CLOUD_LABEL_ANN}{k}"), v.clone());
+        }
+    }
+    labels.insert(MANAGED_BY_KEY.to_string(), MANAGED_BY_VALUE.to_string());
+
+    Ok(SpecMapping {
+        spec: sandbox_spec,
+        labels,
+        annotations: ann,
+    })
+}
+
+/// Translate msb's `?labels=` param (a JSON object of `key=value`) into a k8s
+/// equality label selector (`k1=v1,k2=v2`). `None`/empty means no filter.
+/// Errors on malformed JSON so a client's typo doesn't silently return everything.
+pub fn labels_query_to_selector(labels: Option<&str>) -> Result<Option<String>, GatewayError> {
+    let raw = match labels {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(None),
+    };
+    let map: BTreeMap<String, String> = serde_json::from_str(raw).map_err(|e| {
+        GatewayError::InvalidRequest(format!("labels filter must be a JSON object: {e}"))
+    })?;
+    if map.is_empty() {
+        return Ok(None);
+    }
+    let sel = map
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(Some(sel))
 }
 
 fn stash(ann: &mut BTreeMap<String, String>, key: &str, val: Option<&String>) {
@@ -233,7 +313,7 @@ mod tests {
 
     #[test]
     fn structured_fields_map_to_spec_and_rest_to_annotations() {
-        let (spec, ann) = request_to_spec(&req()).unwrap();
+        let SpecMapping { spec, annotations: ann, .. } = request_to_spec(&req()).unwrap();
         assert_eq!(spec.image, "alpine:3.20");
         assert_eq!(spec.cpus, 2);
         assert_eq!(spec.memory, 1024);
@@ -244,6 +324,54 @@ mod tests {
         assert!(ann.contains_key("microsandbox.dev/cloud-env"));
         assert_eq!(ann.get("microsandbox.dev/cloud-workdir").unwrap(), "/app");
         assert!(!ann.contains_key("microsandbox.dev/cloud-shell"));
+    }
+
+    #[test]
+    fn k8s_valid_labels_map_to_metadata_labels() {
+        let mut r = req();
+        r.spec.labels.insert("app".into(), "web".into());
+        r.spec.labels.insert("team.example.com/tier".into(), "frontend".into());
+        let SpecMapping { labels, annotations: ann, .. } = request_to_spec(&r).unwrap();
+        assert_eq!(labels.get("app").unwrap(), "web");
+        assert_eq!(labels.get("team.example.com/tier").unwrap(), "frontend");
+        // No cloud-label.* annotation for a label that fit metadata.labels.
+        assert!(!ann.keys().any(|k| k.starts_with(CLOUD_LABEL_ANN)));
+    }
+
+    #[test]
+    fn free_form_labels_fall_back_to_annotations() {
+        let mut r = req();
+        // Value too long / illegal charset for a k8s label — preserved, not dropped.
+        r.spec.labels.insert("note".into(), "a value with spaces".into());
+        let SpecMapping { labels, annotations: ann, .. } = request_to_spec(&r).unwrap();
+        assert!(!labels.contains_key("note"));
+        assert_eq!(
+            ann.get("microsandbox.dev/cloud-label.note").unwrap(),
+            "a value with spaces"
+        );
+    }
+
+    #[test]
+    fn managed_by_label_is_always_stamped() {
+        let SpecMapping { labels, .. } = request_to_spec(&req()).unwrap();
+        assert_eq!(labels.get(MANAGED_BY_KEY).unwrap(), MANAGED_BY_VALUE);
+    }
+
+    #[test]
+    fn labels_query_becomes_a_k8s_selector() {
+        assert_eq!(labels_query_to_selector(None).unwrap(), None);
+        assert_eq!(labels_query_to_selector(Some("")).unwrap(), None);
+        assert_eq!(labels_query_to_selector(Some("{}")).unwrap(), None);
+        assert_eq!(
+            labels_query_to_selector(Some(r#"{"app":"web"}"#)).unwrap(),
+            Some("app=web".to_string())
+        );
+        // BTreeMap ordering makes the selector deterministic.
+        assert_eq!(
+            labels_query_to_selector(Some(r#"{"b":"2","a":"1"}"#)).unwrap(),
+            Some("a=1,b=2".to_string())
+        );
+        assert!(labels_query_to_selector(Some("not-json")).is_err());
     }
 
     #[test]
@@ -289,7 +417,7 @@ mod tests {
     fn gateway_created_sandbox_maps_to_response() {
         // Simulate what create writes: spec + annotations, then map back. The
         // echoed fields live in annotations; the response carries lifecycle state.
-        let (spec, ann) = request_to_spec(&req()).unwrap();
+        let SpecMapping { spec, labels, annotations: ann } = request_to_spec(&req()).unwrap();
         assert_eq!(
             ann.get("microsandbox.dev/cloud-env").unwrap(),
             &serde_json::to_string(&vec![EnvVar {
@@ -303,6 +431,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("my-sb".into()),
                 namespace: Some("ns".into()),
+                labels: Some(labels.into_iter().collect()),
                 annotations: Some(ann.into_iter().collect()),
                 ..Default::default()
             },
