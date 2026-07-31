@@ -16,8 +16,12 @@ pub enum PullError {
         source: std::io::Error,
     },
 
-    #[error("`msb pull {image}` exited {code}")]
-    Exit { image: String, code: String },
+    #[error("`msb pull {image}` exited {code}: {stderr}")]
+    Exit {
+        image: String,
+        code: String,
+        stderr: String,
+    },
 
     #[error("`msb pull {image}` left no VMDK under {cache}")]
     NoArtifacts { image: String, cache: String },
@@ -28,25 +32,27 @@ pub enum PullError {
 pub async fn pull(msb: &Path, msb_home: &Path, image: &str) -> Result<(), PullError> {
     info!(%image, msb_home = %msb_home.display(), "pulling + converting image");
 
-    let status = Command::new(msb)
+    let output = Command::new(msb)
         .arg("pull")
         .arg(image)
         .env("MSB_HOME", msb_home)
         .stdin(Stdio::null())
-        .status()
+        .output()
         .await
         .map_err(|source| PullError::Spawn {
             image: image.to_string(),
             source,
         })?;
 
-    if !status.success() {
+    if !output.status.success() {
         return Err(PullError::Exit {
             image: image.to_string(),
-            code: status
+            code: output
+                .status
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "signal".to_string()),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
 
