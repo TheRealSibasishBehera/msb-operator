@@ -11,7 +11,7 @@
 FROM ubuntu:24.04 AS vmm
 
 # Pinned; bump deliberately after re-checking the contract.
-ARG MSB_VERSION=v0.6.6
+ARG MSB_VERSION=v0.6.8
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

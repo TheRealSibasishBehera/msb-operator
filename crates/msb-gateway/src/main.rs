@@ -5,7 +5,7 @@
 //! - **lifecycle** (`lifecycle`) — the REST routes the SDK calls
 //!   (`POST/GET/DELETE /v1/sandboxes*`, `/start`, `/stop`): translate the cloud
 //!   wire types ↔ our `Sandbox` CRD.
-//! - **exec** (`exec`) — `WS /v1/sandboxes/:id/exec.cbor`: resolve the sandbox to
+//! - **exec** (`exec`) — `WS /v1/sandboxes/:id/agent`: resolve the sandbox to
 //!   its bridge Service and byte-splice the client WS to the bridge WS (never
 //!   parses the agent frames).
 //!
@@ -34,9 +34,6 @@ use tracing::{error, info};
 
 use crate::exec::SpliceConfig;
 use crate::limits::ConnLimiter;
-
-/// The exec WS subprotocol the SDK requests and we must echo on the upgrade.
-const EXEC_SUBPROTOCOL: &str = "msb.cbor";
 
 #[derive(Parser)]
 #[command(name = "msb-gateway")]
@@ -96,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
-        .route("/v1/sandboxes/:name/exec.cbor", get(exec_handler))
+        .route("/v1/sandboxes/:name/agent", get(exec_handler))
         .merge(lifecycle::routes())
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
@@ -107,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `GET /v1/sandboxes/:name/exec.cbor` — auth, resolve, upgrade, splice.
+/// `GET /v1/sandboxes/:name/agent` — auth, resolve, upgrade, splice.
 async fn exec_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -149,11 +146,9 @@ async fn exec_handler(
         Err(e) => return e.into_response(),
     };
 
-    // Echo the SDK's subprotocol so its `connect_async` upgrade succeeds, and
-    // cap the client leg's frame/message size (the bridge leg is capped on dial).
+    // Cap the client leg's frame/message size (the bridge leg is capped on dial).
     let cfg = state.splice_cfg;
     let ws = ws
-        .protocols([EXEC_SUBPROTOCOL])
         .max_frame_size(cfg.max_frame_bytes)
         .max_message_size(cfg.max_frame_bytes);
     let bridge_url = target.url;

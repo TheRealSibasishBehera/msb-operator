@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use kube::api::ObjectMeta;
-use microsandbox_types::{CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus};
+use microsandbox_types::{
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudRootfsSource, CloudSandboxStatus,
+};
 use msb_crd::{Sandbox, SandboxPhase, SandboxSpec, SandboxStatus};
 
 use crate::error::GatewayError;
@@ -41,16 +43,28 @@ pub fn validate_name(name: &str) -> Result<(), GatewayError> {
 pub fn request_to_spec(
     req: &CloudCreateSandboxRequest,
 ) -> Result<(SandboxSpec, BTreeMap<String, String>), GatewayError> {
-    validate_name(&req.name)?;
+    let spec = &req.spec;
+    validate_name(&spec.name)?;
 
-    let spec = SandboxSpec {
-        image: req.image.clone(),
-        cpus: req.vcpus as u32,
-        memory: req.memory_mib,
-        cmd: req.entrypoint.clone().unwrap_or_default(),
-        ephemeral: req.ephemeral,
-        max_duration_secs: req.max_duration_secs,
-        idle_timeout_secs: req.idle_timeout_secs,
+    // Our CRD image is a plain OCI reference; the host-path variants have no
+    // representation in our model (and would be a host-access escape).
+    let image = match &spec.image {
+        CloudRootfsSource::Oci { reference } => reference.clone(),
+        _ => {
+            return Err(GatewayError::InvalidRequest(
+                "only OCI image references are supported".into(),
+            ))
+        }
+    };
+
+    let sandbox_spec = SandboxSpec {
+        image,
+        cpus: spec.resources.vcpus as u32,
+        memory: spec.resources.memory_mib,
+        cmd: spec.runtime.entrypoint.clone().unwrap_or_default(),
+        ephemeral: spec.lifecycle.ephemeral,
+        max_duration_secs: spec.lifecycle.max_duration_secs,
+        idle_timeout_secs: spec.lifecycle.idle_timeout_secs,
         run_policy: Default::default(),
         secrets: Vec::new(),
         network: Default::default(),
@@ -60,22 +74,25 @@ pub fn request_to_spec(
 
     let mut ann = BTreeMap::new();
     // env: no CRD spec field → annotation for echo. NOT injected into the guest.
-    if !req.env.is_empty() {
-        if let Ok(j) = serde_json::to_string(&req.env) {
+    if !spec.env.is_empty() {
+        if let Ok(j) = serde_json::to_string(&spec.env) {
             ann.insert(format!("{CLOUD_ANN}env"), j);
         }
     }
-    stash(&mut ann, "workdir", req.workdir.as_ref());
-    stash(&mut ann, "shell", req.shell.as_ref());
-    stash(&mut ann, "hostname", req.hostname.as_ref());
-    stash(&mut ann, "user", req.user.as_ref());
-    stash(&mut ann, "log-level", req.log_level.as_ref());
-    if !req.scripts.is_empty() {
-        if let Ok(j) = serde_json::to_string(&req.scripts) {
+    stash(&mut ann, "workdir", spec.runtime.workdir.as_ref());
+    stash(&mut ann, "shell", spec.runtime.shell.as_ref());
+    stash(&mut ann, "user", spec.runtime.user.as_ref());
+    if let Some(lvl) = spec.runtime.log_level {
+        if let Ok(j) = serde_json::to_string(&lvl) {
+            ann.insert(format!("{CLOUD_ANN}log-level"), j.trim_matches('"').to_string());
+        }
+    }
+    if !spec.runtime.scripts.is_empty() {
+        if let Ok(j) = serde_json::to_string(&spec.runtime.scripts) {
             ann.insert(format!("{CLOUD_ANN}scripts"), j);
         }
     }
-    Ok((spec, ann))
+    Ok((sandbox_spec, ann))
 }
 
 fn stash(ann: &mut BTreeMap<String, String>, key: &str, val: Option<&String>) {
@@ -102,9 +119,10 @@ pub fn phase_to_status(
     }
 }
 
-/// Sandbox CRD -> a fully-populated `CloudSandbox`. All required fields derive from
-/// spec, so a raw-`kubectl` Sandbox (no `cloud-*` annotations) still decodes.
-pub fn sandbox_to_cloud(sb: &Sandbox, namespace: &str) -> CloudSandbox {
+/// Sandbox CRD -> a fully-populated `CloudCreateSandboxResponse`. All required
+/// fields derive from metadata/status, so a raw-`kubectl` Sandbox (no `cloud-*`
+/// annotations) still decodes.
+pub fn sandbox_to_cloud(sb: &Sandbox, _namespace: &str) -> CloudCreateSandboxResponse {
     let meta = &sb.metadata;
     let name = meta.name.clone().unwrap_or_default();
     let status = sb.status.clone().unwrap_or_default();
@@ -118,54 +136,21 @@ pub fn sandbox_to_cloud(sb: &Sandbox, namespace: &str) -> CloudSandbox {
     let stopped_at = parse_ts(status.terminated_at.as_deref());
     let last_error = last_error(&status);
 
-    CloudSandbox {
-        id: name.clone(), // we collapse id == name
-        org_id: namespace.to_string(),
+    CloudCreateSandboxResponse {
+        id: name.clone(), // we collapse id == name; a closed loop we own both ends of
+        org_id: String::new(),
+        slug: name.clone(),
         name,
         status: wire_status,
-        config: reconstruct_config(sb, &status),
+        status_reason: None,
+        // The server-owned resolved-spec projection; the SDK never reconstructs
+        // the request from it, so we omit it.
+        spec: None,
         ephemeral: sb.spec.ephemeral,
         created_at: meta_created_at(meta),
         started_at,
         stopped_at,
-        last_error,
-    }
-}
-
-// Rebuild the create request from spec + annotations; every non-Option field is
-// always filled so the response decodes even without annotations.
-fn reconstruct_config(sb: &Sandbox, _status: &SandboxStatus) -> CloudCreateSandboxRequest {
-    let ann = sb.metadata.annotations.clone().unwrap_or_default();
-    let get = |k: &str| ann.get(&format!("{CLOUD_ANN}{k}")).cloned();
-
-    let env = get("env")
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
-    let scripts = get("scripts")
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
-    let entrypoint = if sb.spec.cmd.is_empty() {
-        None
-    } else {
-        Some(sb.spec.cmd.clone())
-    };
-
-    CloudCreateSandboxRequest {
-        name: sb.metadata.name.clone().unwrap_or_default(),
-        image: sb.spec.image.clone(),
-        vcpus: sb.spec.cpus.min(u8::MAX as u32) as u8,
-        memory_mib: sb.spec.memory,
-        env,
-        ephemeral: sb.spec.ephemeral,
-        workdir: get("workdir"),
-        shell: get("shell"),
-        entrypoint,
-        hostname: get("hostname"),
-        user: get("user"),
-        log_level: get("log-level"),
-        scripts,
-        max_duration_secs: sb.spec.max_duration_secs,
-        idle_timeout_secs: sb.spec.idle_timeout_secs,
+        last_failure_message: last_error,
     }
 }
 
@@ -198,25 +183,38 @@ fn meta_created_at(meta: &ObjectMeta) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use microsandbox_types::{
+        CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, EnvVar, SandboxPolicy,
+    };
 
     fn req() -> CloudCreateSandboxRequest {
         CloudCreateSandboxRequest {
-            name: "my-sb".into(),
-            image: "alpine:3.20".into(),
-            vcpus: 2,
-            memory_mib: 1024,
-            env: HashMap::from([("K".into(), "V".into())]),
-            ephemeral: true,
-            workdir: Some("/app".into()),
-            shell: None,
-            entrypoint: Some(vec!["sleep".into(), "300".into()]),
-            hostname: None,
-            user: None,
-            log_level: None,
-            scripts: HashMap::new(),
-            max_duration_secs: Some(600),
-            idle_timeout_secs: None,
+            spec: CloudSandboxSpec {
+                name: "my-sb".into(),
+                image: CloudRootfsSource::Oci {
+                    reference: "alpine:3.20".into(),
+                },
+                resources: CloudSandboxResources {
+                    vcpus: 2,
+                    memory_mib: 1024,
+                    disk_size_mib: None,
+                },
+                runtime: CloudSandboxRuntimeOptions {
+                    workdir: Some("/app".into()),
+                    entrypoint: Some(vec!["sleep".into(), "300".into()]),
+                    ..Default::default()
+                },
+                env: vec![EnvVar {
+                    key: "K".into(),
+                    value: "V".into(),
+                }],
+                lifecycle: SandboxPolicy {
+                    ephemeral: true,
+                    max_duration_secs: Some(600),
+                    idle_timeout_secs: None,
+                },
+                ..Default::default()
+            },
         }
     }
 
@@ -251,7 +249,7 @@ mod tests {
     #[test]
     fn bad_name_rejected_by_request_to_spec() {
         let mut r = req();
-        r.name = "BAD_NAME".into();
+        r.spec.name = "BAD_NAME".into();
         assert!(matches!(request_to_spec(&r), Err(GatewayError::InvalidRequest(_))));
     }
 
@@ -270,8 +268,8 @@ mod tests {
 
     #[test]
     fn raw_kubectl_sandbox_with_no_annotations_still_maps_cleanly() {
-        // A Sandbox created directly (no cloud-* annotations, no status): config
-        // must still be fully populated so list/get decode.
+        // A Sandbox created directly (no cloud-* annotations, no status): the
+        // response must still be fully populated so list/get decode.
         let sb = sandbox_from_json(serde_json::json!({
             "apiVersion": "sandbox.microsandbox.dev/v1alpha1",
             "kind": "Sandbox",
@@ -281,34 +279,40 @@ mod tests {
         let cloud = sandbox_to_cloud(&sb, "team-a");
         assert_eq!(cloud.id, "raw-sb");
         assert_eq!(cloud.name, "raw-sb");
-        assert_eq!(cloud.org_id, "team-a");
-        assert_eq!(cloud.config.image, "alpine:3.20");
-        assert_eq!(cloud.config.vcpus, 1);
-        assert!(cloud.config.env.is_empty()); // defaulted, not missing
-        assert_eq!(cloud.config.entrypoint, None); // empty cmd -> None
+        assert_eq!(cloud.slug, "raw-sb");
+        assert!(cloud.spec.is_none()); // server-owned projection, we omit it
+        assert!(!cloud.ephemeral);
         assert!(matches!(cloud.status, CloudSandboxStatus::Created)); // no phase, not started
     }
 
     #[test]
-    fn gateway_created_sandbox_round_trips_config() {
-        // Simulate what create writes: spec + annotations, then map back.
+    fn gateway_created_sandbox_maps_to_response() {
+        // Simulate what create writes: spec + annotations, then map back. The
+        // echoed fields live in annotations; the response carries lifecycle state.
         let (spec, ann) = request_to_spec(&req()).unwrap();
-        let mut annotations = std::collections::BTreeMap::new();
-        annotations.extend(ann);
+        assert_eq!(
+            ann.get("microsandbox.dev/cloud-env").unwrap(),
+            &serde_json::to_string(&vec![EnvVar {
+                key: "K".into(),
+                value: "V".into()
+            }])
+            .unwrap()
+        );
+        assert_eq!(ann.get("microsandbox.dev/cloud-workdir").unwrap(), "/app");
         let sb = Sandbox {
             metadata: ObjectMeta {
                 name: Some("my-sb".into()),
                 namespace: Some("ns".into()),
-                annotations: Some(annotations),
+                annotations: Some(ann.into_iter().collect()),
                 ..Default::default()
             },
             spec,
             status: None,
         };
         let cloud = sandbox_to_cloud(&sb, "ns");
-        assert_eq!(cloud.config.env.get("K").map(String::as_str), Some("V"));
-        assert_eq!(cloud.config.workdir.as_deref(), Some("/app"));
-        assert_eq!(cloud.config.max_duration_secs, Some(600));
-        assert_eq!(cloud.config.entrypoint, Some(vec!["sleep".into(), "300".into()]));
+        assert_eq!(cloud.name, "my-sb");
+        assert_eq!(cloud.id, "my-sb");
+        assert!(cloud.ephemeral);
+        assert!(cloud.spec.is_none());
     }
 }

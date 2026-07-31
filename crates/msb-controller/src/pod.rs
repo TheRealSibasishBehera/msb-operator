@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, KeyToPath, Pod,
-    PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile, SecretVolumeSource,
-    SecurityContext, Volume, VolumeMount,
+    PodSecurityContext, PodSpec, Probe, ResourceRequirements, SeccompProfile, SecretVolumeSource,
+    SecurityContext, TCPSocketAction, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Resource;
 use msb_crd::{Sandbox, SandboxSpec};
@@ -321,6 +322,15 @@ fn bridge_container(cfg: &ControllerConfig, flat_name: &str) -> Container {
             protocol: Some("TCP".to_string()),
             ..Default::default()
         }]),
+        // Gate the Service endpoint on the bridge having bound the port.
+        readiness_probe: Some(Probe {
+            tcp_socket: Some(TCPSocketAction {
+                port: IntOrString::Int(cfg.bridge_port),
+                ..Default::default()
+            }),
+            period_seconds: Some(1),
+            ..Default::default()
+        }),
         // The agent socket lives under $MSB_HOME/run, which msb cannot relocate,
         // so the bridge reaches it through the shared home rather than its own volume.
         volume_mounts: Some(vec![VolumeMount {

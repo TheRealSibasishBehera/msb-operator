@@ -110,9 +110,9 @@ async fn main() -> Result<()> {
         .memory(spec.memory);
 
     if !spec.cmd.is_empty() {
-        // Ties the VM's lifetime to the command (it stops when the command
-        // exits); `initial_command` would instead leave the VM up for exec.
-        builder = builder.persistent_initial_command(spec.cmd.clone());
+        // Background (detached) launch: the VM stops when the command exits
+        // (run-to-completion). Foreground is the attached, one-shot `msb run` path.
+        builder = builder.background_command(spec.cmd.clone());
     }
 
     // The VM launcher enforces these, so no controller-side deadline is needed.
