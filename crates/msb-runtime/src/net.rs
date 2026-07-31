@@ -4,8 +4,10 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use anyhow::Context;
 use microsandbox::NetworkPolicy;
 use microsandbox::sandbox::SandboxBuilder;
+use microsandbox_network::dns::Nameserver;
 use msb_crd::sandbox::{PolicyPreset, PortProtocol};
 use msb_crd::{ResolvedSecret, SandboxSpec};
 
@@ -16,11 +18,18 @@ pub fn apply(
     builder: SandboxBuilder,
     spec: &SandboxSpec,
     secrets: &[ResolvedSecret],
-) -> SandboxBuilder {
+) -> anyhow::Result<SandboxBuilder> {
     let net = spec.network.clone();
     let secrets = secrets.to_vec();
 
-    builder.network(move |mut n| {
+    let nameservers = net
+        .dns
+        .nameservers
+        .iter()
+        .map(|s| s.parse::<Nameserver>().with_context(|| format!("dns nameserver {s:?}")))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok(builder.network(move |mut n| {
         n = n.enabled(net.enabled).policy(policy(&net.policy.preset));
 
         for p in &net.published_ports {
@@ -36,6 +45,18 @@ pub fn apply(
             let ports: Vec<u16> = net.tls.intercepted_ports.iter().map(|p| p.port).collect();
             n = n.tls(move |t| t.intercepted_ports(ports));
         }
+
+        // With no nameservers, msb inherits the pod's resolv.conf (CoreDNS).
+        let rebind = net.dns.rebind_protection;
+        let timeout = net.dns.query_timeout_ms as u64;
+        let nameservers = nameservers.clone();
+        n = n.dns(move |mut d| {
+            d = d.rebind_protection(rebind).query_timeout_ms(timeout);
+            if !nameservers.is_empty() {
+                d = d.nameservers(nameservers.clone());
+            }
+            d
+        });
 
         n = n
             .max_connections(net.max_connections as usize)
@@ -57,7 +78,7 @@ pub fn apply(
         }
 
         n
-    })
+    }))
 }
 
 fn policy(preset: &PolicyPreset) -> NetworkPolicy {

@@ -16,6 +16,7 @@ msb-crd = { path = "../msb-crd" }
 # is a library and deliberately leaves the version feature unset).
 k8s-openapi = { version = "0.28", features = ["v1_32"], default-features = false }
 microsandbox = { workspace = true, features = ["net", "prebuilt"] }
+microsandbox-network = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

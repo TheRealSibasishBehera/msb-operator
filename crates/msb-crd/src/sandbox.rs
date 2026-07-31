@@ -89,10 +89,6 @@ pub struct SandboxSpec {
     /// Writable overlay layer configuration.
     #[serde(default)]
     pub upper: UpperSpec,
-
-    /// Named volumes (node-local in V1).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub volumes: Vec<VolumeSpec>,
 }
 
 fn default_cpus() -> u32 {
@@ -338,15 +334,6 @@ impl Default for UpperSpec {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct VolumeSpec {
-    pub name: String,
-    pub mount_path: String,
-    /// Volume size as a Kubernetes resource.Quantity string (e.g. "10Gi").
-    pub size: String,
-}
-
 // --- Run policy ---
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -499,7 +486,6 @@ mod tests {
             secrets: vec![],
             network: NetworkSpec::default(),
             upper: UpperSpec::default(),
-            volumes: vec![],
         };
         assert_eq!(spec.cpus, 1);
         assert_eq!(spec.memory, 512);

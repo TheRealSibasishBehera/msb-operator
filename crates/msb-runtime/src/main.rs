@@ -51,6 +51,30 @@ struct Cli {
     secrets_dir: PathBuf,
 }
 
+/// Parse a Kubernetes resource.Quantity (e.g. `4Gi`, `512Mi`, `2G`) to whole
+/// MiB, rounding up. Only the binary/decimal suffixes a disk size sensibly uses.
+fn quantity_to_mib(q: &str) -> Result<u32> {
+    let q = q.trim();
+    let (num, mult_bytes): (&str, u64) = if let Some(n) = q.strip_suffix("Gi") {
+        (n, 1024 * 1024 * 1024)
+    } else if let Some(n) = q.strip_suffix("Mi") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = q.strip_suffix("Ki") {
+        (n, 1024)
+    } else if let Some(n) = q.strip_suffix('G') {
+        (n, 1_000_000_000)
+    } else if let Some(n) = q.strip_suffix('M') {
+        (n, 1_000_000)
+    } else {
+        (q, 1)
+    };
+    let value: f64 = num.trim().parse().with_context(|| format!("invalid quantity {q:?}"))?;
+    anyhow::ensure!(value >= 0.0, "quantity {q:?} must be non-negative");
+    let bytes = value * mult_bytes as f64;
+    let mib = (bytes / (1024.0 * 1024.0)).ceil();
+    Ok(mib as u32)
+}
+
 /// Reads each referenced Secret's plaintext from its kubelet-mounted volume (no
 /// API access) and resolves it. A missing file is a hard error: the pod fails
 /// closed rather than booting with an empty secret.
@@ -109,6 +133,10 @@ async fn main() -> Result<()> {
         .cpus(spec.cpus as u8)
         .memory(spec.memory);
 
+    // Writable overlay ("upper") capacity for the guest's `/`. Unset in the CRD
+    // defaults to msb's own 4 GiB, so this only bites when the user overrides.
+    builder = builder.root_disk(quantity_to_mib(&spec.upper.size)?);
+
     if !spec.entrypoint.is_empty() {
         builder = builder.entrypoint(spec.entrypoint.clone());
     }
@@ -143,7 +171,7 @@ async fn main() -> Result<()> {
 
     // Apply the network policy and secret substitution; without this the guest
     // boots with neither.
-    builder = net::apply(builder, &spec, &secrets);
+    builder = net::apply(builder, &spec, &secrets)?;
 
     info!(
         sandbox = %cli.sandbox_name,
@@ -179,4 +207,21 @@ async fn main() -> Result<()> {
         (None, None) => 0,
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quantity_to_mib;
+
+    #[test]
+    fn parses_quantities_to_mib() {
+        assert_eq!(quantity_to_mib("4Gi").unwrap(), 4096);
+        assert_eq!(quantity_to_mib("8Gi").unwrap(), 8192);
+        assert_eq!(quantity_to_mib("512Mi").unwrap(), 512);
+        assert_eq!(quantity_to_mib("1Ki").unwrap(), 1); // rounds up
+        assert_eq!(quantity_to_mib("1G").unwrap(), 954); // 1e9 bytes -> 953.7 MiB, ceil
+        assert_eq!(quantity_to_mib("1024").unwrap(), 1); // bare bytes
+        assert!(quantity_to_mib("garbage").is_err());
+        assert!(quantity_to_mib("-1Gi").is_err());
+    }
 }
