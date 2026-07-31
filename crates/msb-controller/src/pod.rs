@@ -309,6 +309,11 @@ fn bridge_container(cfg: &ControllerConfig, flat_name: &str) -> Container {
                 value: Some(cfg.bridge_port.to_string()),
                 ..Default::default()
             },
+            EnvVar {
+                name: "RUST_LOG".to_string(),
+                value: Some(cfg.runtime_log.clone()),
+                ..Default::default()
+            },
         ]),
         ports: Some(vec![ContainerPort {
             name: Some("agent".to_string()),
@@ -956,6 +961,8 @@ mod tests {
         assert_eq!(inits.len(), 1, "only the bridge sidecar");
         assert_eq!(inits[0].name, "msb-bridge");
         assert_eq!(inits[0].restart_policy.as_deref(), Some("Always"));
+        // The bridge must get RUST_LOG or it logs nothing and is undebuggable.
+        assert!(env_of(&inits[0], "RUST_LOG").is_some());
         let names: Vec<_> = spec.containers.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["msb-runtime"]);
     }
