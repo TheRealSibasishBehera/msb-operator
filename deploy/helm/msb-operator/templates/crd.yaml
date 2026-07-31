@@ -56,13 +56,48 @@ spec:
                 format: uint32
                 minimum: 0.0
                 type: integer
+              entrypoint:
+                description: Override the image entrypoint. Empty keeps the image's own entrypoint.
+                items:
+                  type: string
+                type: array
+              env:
+                description: Plain (non-secret) environment variables set in the guest.
+                items:
+                  description: A plain (non-secret) environment variable set in the guest.
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
               ephemeral:
                 default: false
                 description: Whether to delete the Sandbox CRD after the sandbox exits.
                 type: boolean
+              hostname:
+                description: Guest hostname.
+                nullable: true
+                type: string
+              idleTimeoutSecs:
+                description: Stop the sandbox after this many seconds with no activity.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
               image:
                 description: OCI image for the guest root filesystem.
                 type: string
+              maxDurationSecs:
+                description: Hard cap on total sandbox lifetime, in seconds.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
               memory:
                 default: 512
                 description: Memory in MiB.
@@ -128,10 +163,24 @@ spec:
                     description: Guest ports to expose on the Pod IP.
                     items:
                       properties:
-                        containerPort:
+                        guestPort:
+                          description: Port the guest listens on.
                           format: uint16
                           maximum: 65535.0
                           minimum: 0.0
+                          type: integer
+                        hostBind:
+                          default: 0.0.0.0
+                          description: |-
+                            Pod-side bind address. Defaults to `0.0.0.0` so the port is reachable on
+                            the Pod IP (msb's own default is loopback, which is unreachable in a pod).
+                          type: string
+                        hostPort:
+                          description: Port exposed on the pod. Defaults to `guest_port`.
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          nullable: true
                           type: integer
                         protocol:
                           default: TCP
@@ -140,7 +189,7 @@ spec:
                           - UDP
                           type: string
                       required:
-                      - containerPort
+                      - guestPort
                       type: object
                     type: array
                   tls:
@@ -208,6 +257,10 @@ spec:
                   - valueFrom
                   type: object
                 type: array
+              shell:
+                description: Default shell for guest sessions.
+                nullable: true
+                type: string
               upper:
                 default:
                   size: 4Gi
@@ -218,6 +271,10 @@ spec:
                     description: Writable overlay size as a Kubernetes resource.Quantity string (e.g. "4Gi").
                     type: string
                 type: object
+              user:
+                description: User the guest workload runs as (name, uid, or `uid:gid`).
+                nullable: true
+                type: string
               volumes:
                 description: Named volumes (node-local in V1).
                 items:
@@ -235,6 +292,10 @@ spec:
                   - size
                   type: object
                 type: array
+              workdir:
+                description: Working directory for guest commands.
+                nullable: true
+                type: string
             required:
             - image
             type: object
@@ -272,6 +333,33 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              exposedPorts:
+                description: |-
+                  Ports exposed on the per-sandbox Service, reflected so `kubectl describe`
+                  shows where a guest listener is reachable.
+                items:
+                  description: A port reachable on the per-sandbox Service.
+                  properties:
+                    name:
+                      description: The Service port name, referenceable by Ingress/Istio.
+                      type: string
+                    port:
+                      description: Port on the Service (and Pod).
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      type: integer
+                    protocol:
+                      enum:
+                      - TCP
+                      - UDP
+                      type: string
+                  required:
+                  - name
+                  - port
+                  - protocol
+                  type: object
+                type: array
               nodeName:
                 nullable: true
                 type: string

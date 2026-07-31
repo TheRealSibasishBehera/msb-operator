@@ -38,6 +38,30 @@ pub struct SandboxSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cmd: Vec<String>,
 
+    /// Override the image entrypoint. Empty keeps the image's own entrypoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entrypoint: Vec<String>,
+
+    /// Plain (non-secret) environment variables set in the guest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvVar>,
+
+    /// Working directory for guest commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+
+    /// Default shell for guest sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+
+    /// User the guest workload runs as (name, uid, or `uid:gid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// Guest hostname.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+
     /// Whether to delete the Sandbox CRD after the sandbox exits.
     #[serde(default)]
     pub ephemeral: bool,
@@ -77,6 +101,14 @@ fn default_cpus() -> u32 {
 
 fn default_memory_mib() -> u32 {
     512
+}
+
+/// A plain (non-secret) environment variable set in the guest.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 // --- Secrets ---
@@ -454,6 +486,12 @@ mod tests {
             cpus: default_cpus(),
             memory: default_memory_mib(),
             cmd: vec![],
+            entrypoint: vec![],
+            env: vec![],
+            workdir: None,
+            shell: None,
+            user: None,
+            hostname: None,
             ephemeral: false,
             max_duration_secs: None,
             idle_timeout_secs: None,

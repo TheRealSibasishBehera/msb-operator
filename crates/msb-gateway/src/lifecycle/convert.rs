@@ -82,8 +82,7 @@ pub struct SpecMapping {
 }
 
 /// Cloud create request -> CRD spec, k8s labels, and annotations for fields with no
-/// spec home. `env` is stashed for echo only, NOT injected into the guest (a V1
-/// limitation). Labels that are valid k8s labels become selectable `metadata.labels`;
+/// spec home. Labels that are valid k8s labels become selectable `metadata.labels`;
 /// the rest (msb labels are free-form) are preserved as `cloud-label.*` annotations.
 pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, GatewayError> {
     let spec = &req.spec;
@@ -104,7 +103,22 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         image,
         cpus: spec.resources.vcpus as u32,
         memory: spec.resources.memory_mib,
-        cmd: spec.runtime.entrypoint.clone().unwrap_or_default(),
+        // msb's `cmd` is the argv (the common override); `entrypoint` overrides the
+        // image entrypoint. Map each to its own CRD field.
+        cmd: spec.runtime.cmd.clone().unwrap_or_default(),
+        entrypoint: spec.runtime.entrypoint.clone().unwrap_or_default(),
+        env: spec
+            .env
+            .iter()
+            .map(|e| msb_crd::sandbox::EnvVar {
+                name: e.key.clone(),
+                value: e.value.clone(),
+            })
+            .collect(),
+        workdir: spec.runtime.workdir.clone(),
+        shell: spec.runtime.shell.clone(),
+        user: spec.runtime.user.clone(),
+        hostname: None,
         ephemeral: spec.lifecycle.ephemeral,
         max_duration_secs: spec.lifecycle.max_duration_secs,
         idle_timeout_secs: spec.lifecycle.idle_timeout_secs,
@@ -116,15 +130,6 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
     };
 
     let mut ann = BTreeMap::new();
-    // env: no CRD spec field → annotation for echo. NOT injected into the guest.
-    if !spec.env.is_empty() {
-        if let Ok(j) = serde_json::to_string(&spec.env) {
-            ann.insert(format!("{CLOUD_ANN}env"), j);
-        }
-    }
-    stash(&mut ann, "workdir", spec.runtime.workdir.as_ref());
-    stash(&mut ann, "shell", spec.runtime.shell.as_ref());
-    stash(&mut ann, "user", spec.runtime.user.as_ref());
     if let Some(lvl) = spec.runtime.log_level {
         if let Ok(j) = serde_json::to_string(&lvl) {
             ann.insert(format!("{CLOUD_ANN}log-level"), j.trim_matches('"').to_string());
@@ -173,12 +178,6 @@ pub fn labels_query_to_selector(labels: Option<&str>) -> Result<Option<String>, 
         .collect::<Vec<_>>()
         .join(",");
     Ok(Some(sel))
-}
-
-fn stash(ann: &mut BTreeMap<String, String>, key: &str, val: Option<&String>) {
-    if let Some(v) = val {
-        ann.insert(format!("{CLOUD_ANN}{key}"), v.clone());
-    }
 }
 
 /// CRD phase -> the six-variant wire status.
@@ -281,7 +280,10 @@ mod tests {
                 },
                 runtime: CloudSandboxRuntimeOptions {
                     workdir: Some("/app".into()),
-                    entrypoint: Some(vec!["sleep".into(), "300".into()]),
+                    shell: Some("/bin/bash".into()),
+                    user: Some("appuser".into()),
+                    entrypoint: Some(vec!["/entry".into()]),
+                    cmd: Some(vec!["sleep".into(), "300".into()]),
                     ..Default::default()
                 },
                 env: vec![EnvVar {
@@ -312,18 +314,20 @@ mod tests {
     }
 
     #[test]
-    fn structured_fields_map_to_spec_and_rest_to_annotations() {
-        let SpecMapping { spec, annotations: ann, .. } = request_to_spec(&req()).unwrap();
+    fn structured_fields_map_to_spec() {
+        let SpecMapping { spec, .. } = request_to_spec(&req()).unwrap();
         assert_eq!(spec.image, "alpine:3.20");
         assert_eq!(spec.cpus, 2);
         assert_eq!(spec.memory, 1024);
+        // Wire cmd -> CRD cmd; wire entrypoint -> CRD entrypoint (no longer swapped).
         assert_eq!(spec.cmd, vec!["sleep", "300"]);
+        assert_eq!(spec.entrypoint, vec!["/entry"]);
+        assert_eq!(spec.workdir.as_deref(), Some("/app"));
+        assert_eq!(spec.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(spec.user.as_deref(), Some("appuser"));
+        assert_eq!(spec.env, vec![msb_crd::sandbox::EnvVar { name: "K".into(), value: "V".into() }]);
         assert!(spec.ephemeral);
         assert_eq!(spec.max_duration_secs, Some(600));
-        assert!(!ann.contains_key("microsandbox.dev/cloud-max-duration-secs"));
-        assert!(ann.contains_key("microsandbox.dev/cloud-env"));
-        assert_eq!(ann.get("microsandbox.dev/cloud-workdir").unwrap(), "/app");
-        assert!(!ann.contains_key("microsandbox.dev/cloud-shell"));
     }
 
     #[test]
@@ -415,18 +419,9 @@ mod tests {
 
     #[test]
     fn gateway_created_sandbox_maps_to_response() {
-        // Simulate what create writes: spec + annotations, then map back. The
-        // echoed fields live in annotations; the response carries lifecycle state.
+        // Simulate what create writes, then map back: the response carries
+        // lifecycle state derived from spec + metadata.
         let SpecMapping { spec, labels, annotations: ann } = request_to_spec(&req()).unwrap();
-        assert_eq!(
-            ann.get("microsandbox.dev/cloud-env").unwrap(),
-            &serde_json::to_string(&vec![EnvVar {
-                key: "K".into(),
-                value: "V".into()
-            }])
-            .unwrap()
-        );
-        assert_eq!(ann.get("microsandbox.dev/cloud-workdir").unwrap(), "/app");
         let sb = Sandbox {
             metadata: ObjectMeta {
                 name: Some("my-sb".into()),
