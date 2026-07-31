@@ -2,7 +2,7 @@
 //!
 //! Create the Sandbox CRD, then watch until it reaches `Running` within the
 //! bounded budget (< the SDK's 30s client timeout). Outcomes:
-//!   - Running within budget → 200 `CloudSandbox`.
+//!   - Running within budget → 200 `CloudCreateSandboxResponse`.
 //!   - Failed first          → delete the CRD, 400 `invalid_request` (+reason).
 //!   - neither within budget → delete the CRD, 400 `invalid_request`.
 //!   - name already exists   → 409 `name_already_exists` (POST only).
@@ -46,8 +46,9 @@ pub async fn create(
     // distinct "created-but-stopped" state in V1 (we still create + wait). This is
     // a deliberate V1 limitation, surfaced at `warn` so the deviation is visible:
     // a caller relying on `start=false` will still get a Running sandbox back.
+    let name = req.spec.name.clone();
     if !q.start {
-        tracing::warn!(sandbox = %req.name, "create with start=false; V1 boots the sandbox anyway");
+        tracing::warn!(sandbox = %name, "create with start=false; V1 boots the sandbox anyway");
     }
     // Auth: authenticate + derive namespace + authorize `create`.
     let token = match crate::auth::bearer_token(crate::auth::auth_header(&headers)) {
@@ -71,7 +72,7 @@ pub async fn create(
     let api: Api<Sandbox> = Api::namespaced(state.client.clone(), &id.namespace);
     let sandbox = Sandbox {
         metadata: ObjectMeta {
-            name: Some(req.name.clone()),
+            name: Some(name.clone()),
             namespace: Some(id.namespace.clone()),
             annotations: if ann.is_empty() {
                 None
@@ -88,7 +89,7 @@ pub async fn create(
     if let Err(e) = api.create(&PostParams::default(), &sandbox).await {
         return match &e {
             kube::Error::Api(ae) if ae.code == 409 => {
-                GatewayError::AlreadyExists(req.name.clone()).into_response()
+                GatewayError::AlreadyExists(name.clone()).into_response()
             }
             _ => GatewayError::Kube(e).into_response(),
         };
@@ -98,7 +99,7 @@ pub async fn create(
     let deadline = Instant::now() + state.create_timeout;
     let mut poll = POLL_MIN;
     loop {
-        let sb = match api.get(&req.name).await {
+        let sb = match api.get(&name).await {
             Ok(sb) => sb,
             Err(e) => return GatewayError::Kube(e).into_response(),
         };
@@ -114,10 +115,10 @@ pub async fn create(
                     .and_then(|s| s.termination_reason.as_ref())
                     .map(|r| format!("{r:?}"))
                     .unwrap_or_else(|| "sandbox failed".into());
-                cleanup(&api, &req.name).await;
+                cleanup(&api, &name).await;
                 return GatewayError::InvalidRequest(format!(
                     "sandbox {} reached Failed before Running: {reason}",
-                    req.name
+                    name
                 ))
                 .into_response();
             }
@@ -129,12 +130,12 @@ pub async fn create(
             _ => {}
         }
         if Instant::now() >= deadline {
-            warn!(sandbox = %req.name, "create did not reach Running within budget");
-            cleanup(&api, &req.name).await;
+            warn!(sandbox = %name, "create did not reach Running within budget");
+            cleanup(&api, &name).await;
             return GatewayError::InvalidRequest(format!(
                 "sandbox {} did not reach Running within {}s — raise the SDK request_timeout \
                  and retry, or the image is slow to boot",
-                req.name,
+                name,
                 state.create_timeout.as_secs()
             ))
             .into_response();

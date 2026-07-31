@@ -17,6 +17,6 @@ path = "src/main.rs"
 # `prebuilt` is required even for the cloud-only client: the mandatory
 # microsandbox-filesystem build script downloads its agentd under `prebuilt`, but
 # panics for a local build without it. Drop only `net`/`keyring` (LocalBackend).
-microsandbox = { version = "=0.6.6", default-features = false, features = ["prebuilt"] }
+microsandbox = { version = "=0.6.8", default-features = false, features = ["prebuilt"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"

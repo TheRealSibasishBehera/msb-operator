@@ -181,12 +181,32 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     match pod_phase(&existing) {
-        Some("Running") => mark_running(&sandbox, &ctx, &sandboxes, &existing, &name).await,
+        // Gate Running on the bridge sidecar passing its readinessProbe, not just
+        // pod phase: a native sidecar reaches phase Running before it binds :7000,
+        // and the Service has no endpoints until it is ready — so an exec that
+        // raced create would blackhole. Hold Pending until the bridge is dialable.
+        Some("Running") if bridge_ready(&existing) => {
+            mark_running(&sandbox, &ctx, &sandboxes, &existing, &name).await
+        }
+        Some("Running") => Ok(Action::requeue(REQUEUE_WHILE_PENDING)),
         Some("Succeeded") | Some("Failed") => {
             terminate(&sandbox, &ctx, &sandboxes, &pods, &existing, &name).await
         }
         _ => Ok(Action::requeue(REQUEUE_WHILE_PENDING)),
     }
+}
+
+/// True once the `msb-bridge` sidecar has passed its readinessProbe. As a native
+/// sidecar (init container with `restartPolicy: Always`) its status lives in
+/// `init_container_statuses`; `ready` tracks the probe, which is what gates the
+/// Service endpoint.
+fn bridge_ready(pod: &Pod) -> bool {
+    pod.status
+        .as_ref()
+        .and_then(|s| s.init_container_statuses.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.name == "msb-bridge"))
+        .map(|c| c.ready)
+        .unwrap_or(false)
 }
 
 /// The `msb-runtime` container's terminated state, if it has exited. The runtime
@@ -699,6 +719,25 @@ mod tests {
     fn reads_phase_from_pod_status() {
         assert_eq!(pod_phase(&pod_with_phase("Running")), Some("Running"));
         assert_eq!(pod_phase(&Pod::default()), None);
+    }
+
+    #[test]
+    fn bridge_ready_tracks_the_sidecar_probe() {
+        let with_bridge = |ready: bool| Pod {
+            status: Some(PodStatus {
+                init_container_statuses: Some(vec![ContainerStatus {
+                    name: "msb-bridge".to_string(),
+                    ready,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(bridge_ready(&with_bridge(true)));
+        assert!(!bridge_ready(&with_bridge(false)));
+        // No sidecar status yet (pod just Running) is not ready.
+        assert!(!bridge_ready(&pod_with_phase("Running")));
     }
 
     #[test]

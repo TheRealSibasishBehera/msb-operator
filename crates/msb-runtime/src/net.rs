@@ -61,10 +61,11 @@ pub fn apply(
 }
 
 fn policy(preset: &PolicyPreset) -> NetworkPolicy {
+    use microsandbox::NetworkProfile::{Private, Public};
     match preset {
-        PolicyPreset::PublicOnly => NetworkPolicy::public_only(),
+        PolicyPreset::PublicOnly => NetworkPolicy::from_profiles([Public]),
         PolicyPreset::AllowAll => NetworkPolicy::allow_all(),
         PolicyPreset::DenyAll => NetworkPolicy::none(),
-        PolicyPreset::NonLocal => NetworkPolicy::non_local(),
+        PolicyPreset::NonLocal => NetworkPolicy::from_profiles([Public, Private]),
     }
 }

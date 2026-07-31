@@ -2,7 +2,7 @@
 # The daemon shells out to `msb pull`. Pull is pure userspace, so only the `msb`
 # binary is needed — no libkrunfw, no VM libraries.
 FROM ubuntu:24.04 AS msb
-ARG MSB_VERSION=v0.6.6
+ARG MSB_VERSION=v0.6.8
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*

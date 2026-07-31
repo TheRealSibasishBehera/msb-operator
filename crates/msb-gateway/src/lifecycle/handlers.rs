@@ -106,7 +106,7 @@ pub async fn stop(
         Err(e) => return e.into_response(),
     };
     let api = api(&state, &id.namespace);
-    // Capture before deleting so we can return a coherent CloudSandbox.
+    // Capture before deleting so we can return a coherent response.
     let sb = match api.get(&name).await {
         Ok(sb) => sb,
         Err(e) => return map_kube(&name, e).into_response(),
