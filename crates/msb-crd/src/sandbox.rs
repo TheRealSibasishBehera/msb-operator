@@ -89,6 +89,14 @@ pub struct SandboxSpec {
     /// Writable overlay layer configuration.
     #[serde(default)]
     pub upper: UpperSpec,
+
+    /// In-guest hardening applied to exec sessions.
+    #[serde(default)]
+    pub security_profile: SecurityProfile,
+
+    /// POSIX resource limits applied to guest processes at agentd startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rlimits: Vec<Rlimit>,
 }
 
 fn default_cpus() -> u32 {
@@ -334,6 +342,53 @@ impl Default for UpperSpec {
     }
 }
 
+// --- Security & limits ---
+
+/// In-guest hardening for exec sessions. `Restricted` makes agentd set
+/// `no_new_privs`, drop `CAP_SYS_ADMIN`, and force `nosuid,nodev` on user mounts
+/// (breaks in-guest `sudo`/DinD/mount-admin). Applied inside the VM by the guest
+/// kernel, so it needs no host privilege.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub enum SecurityProfile {
+    #[default]
+    Default,
+    Restricted,
+}
+
+/// A POSIX resource limit applied to guest processes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Rlimit {
+    pub resource: RlimitResource,
+    /// Soft limit; the process may raise it up to `hard`.
+    pub soft: u64,
+    /// Hard ceiling.
+    pub hard: u64,
+}
+
+/// The POSIX resource an `Rlimit` bounds (the `RLIMIT_*` family).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum RlimitResource {
+    Cpu,
+    Fsize,
+    Data,
+    Stack,
+    Core,
+    Rss,
+    Nproc,
+    Nofile,
+    Memlock,
+    As,
+    Locks,
+    Sigpending,
+    Msgqueue,
+    Nice,
+    Rtprio,
+    Rttime,
+}
+
 // --- Run policy ---
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -486,6 +541,8 @@ mod tests {
             secrets: vec![],
             network: NetworkSpec::default(),
             upper: UpperSpec::default(),
+            security_profile: SecurityProfile::default(),
+            rlimits: vec![],
         };
         assert_eq!(spec.cpus, 1);
         assert_eq!(spec.memory, 512);

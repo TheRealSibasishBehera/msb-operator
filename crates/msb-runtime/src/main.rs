@@ -16,8 +16,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use microsandbox::Sandbox;
 use microsandbox::config::set_sdk_msb_path;
-use microsandbox::sandbox::PullPolicy;
+use microsandbox::sandbox::{PullPolicy, RlimitResource, SecurityProfile};
 use microsandbox::set_libkrunfw_path;
+use msb_crd::sandbox::{RlimitResource as CrdRlimitResource, SecurityProfile as CrdSecurityProfile};
 use msb_crd::{ResolvedSecret, SandboxSpec};
 use tracing::info;
 
@@ -73,6 +74,35 @@ fn quantity_to_mib(q: &str) -> Result<u32> {
     let bytes = value * mult_bytes as f64;
     let mib = (bytes / (1024.0 * 1024.0)).ceil();
     Ok(mib as u32)
+}
+
+fn security_profile(p: &CrdSecurityProfile) -> SecurityProfile {
+    match p {
+        CrdSecurityProfile::Default => SecurityProfile::Default,
+        CrdSecurityProfile::Restricted => SecurityProfile::Restricted,
+    }
+}
+
+fn rlimit_resource(r: &CrdRlimitResource) -> RlimitResource {
+    use CrdRlimitResource as C;
+    match r {
+        C::Cpu => RlimitResource::Cpu,
+        C::Fsize => RlimitResource::Fsize,
+        C::Data => RlimitResource::Data,
+        C::Stack => RlimitResource::Stack,
+        C::Core => RlimitResource::Core,
+        C::Rss => RlimitResource::Rss,
+        C::Nproc => RlimitResource::Nproc,
+        C::Nofile => RlimitResource::Nofile,
+        C::Memlock => RlimitResource::Memlock,
+        C::As => RlimitResource::As,
+        C::Locks => RlimitResource::Locks,
+        C::Sigpending => RlimitResource::Sigpending,
+        C::Msgqueue => RlimitResource::Msgqueue,
+        C::Nice => RlimitResource::Nice,
+        C::Rtprio => RlimitResource::Rtprio,
+        C::Rttime => RlimitResource::Rttime,
+    }
 }
 
 /// Reads each referenced Secret's plaintext from its kubelet-mounted volume (no
@@ -159,6 +189,11 @@ async fn main() -> Result<()> {
     }
     if let Some(h) = &spec.hostname {
         builder = builder.hostname(h);
+    }
+
+    builder = builder.security(security_profile(&spec.security_profile));
+    for r in &spec.rlimits {
+        builder = builder.rlimit_range(rlimit_resource(&r.resource), r.soft, r.hard);
     }
 
     // The VM launcher enforces these, so no controller-side deadline is needed.

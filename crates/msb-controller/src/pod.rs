@@ -453,6 +453,8 @@ pub(crate) mod test_support {
                 secrets: Vec::new(),
                 network: Default::default(),
                 upper: Default::default(),
+                security_profile: Default::default(),
+                rlimits: Vec::new(),
             },
             status: None,
         }
