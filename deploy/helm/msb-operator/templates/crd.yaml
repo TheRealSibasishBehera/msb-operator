@@ -217,6 +217,47 @@ spec:
                     description: Copy host trusted CAs into the guest.
                     type: boolean
                 type: object
+              rlimits:
+                description: POSIX resource limits applied to guest processes at agentd startup.
+                items:
+                  description: A POSIX resource limit applied to guest processes.
+                  properties:
+                    hard:
+                      description: Hard ceiling.
+                      format: uint64
+                      minimum: 0.0
+                      type: integer
+                    resource:
+                      description: The POSIX resource an `Rlimit` bounds (the `RLIMIT_*` family).
+                      enum:
+                      - Cpu
+                      - Fsize
+                      - Data
+                      - Stack
+                      - Core
+                      - Rss
+                      - Nproc
+                      - Nofile
+                      - Memlock
+                      - As
+                      - Locks
+                      - Sigpending
+                      - Msgqueue
+                      - Nice
+                      - Rtprio
+                      - Rttime
+                      type: string
+                    soft:
+                      description: Soft limit; the process may raise it up to `hard`.
+                      format: uint64
+                      minimum: 0.0
+                      type: integer
+                  required:
+                  - hard
+                  - resource
+                  - soft
+                  type: object
+                type: array
               runPolicy:
                 default: Once
                 description: Restart policy on failure.
@@ -257,6 +298,13 @@ spec:
                   - valueFrom
                   type: object
                 type: array
+              securityProfile:
+                default: Default
+                description: In-guest hardening applied to exec sessions.
+                enum:
+                - Default
+                - Restricted
+                type: string
               shell:
                 description: Default shell for guest sessions.
                 nullable: true

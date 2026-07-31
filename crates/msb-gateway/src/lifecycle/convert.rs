@@ -5,8 +5,10 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use kube::api::ObjectMeta;
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudRootfsSource, CloudSandboxStatus,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudRootfsSource, CloudRlimit,
+    CloudRlimitResource, CloudSandboxStatus, SecurityProfile as WireSecurityProfile,
 };
+use msb_crd::sandbox::{Rlimit, RlimitResource, SecurityProfile};
 use msb_crd::{Sandbox, SandboxPhase, SandboxSpec, SandboxStatus};
 
 use crate::error::GatewayError;
@@ -126,6 +128,8 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         secrets: Vec::new(),
         network: Default::default(),
         upper: Default::default(),
+        security_profile: map_security(spec.security_profile),
+        rlimits: map_rlimits(&spec.rlimits),
     };
 
     let mut ann = BTreeMap::new();
@@ -177,6 +181,48 @@ pub fn labels_query_to_selector(labels: Option<&str>) -> Result<Option<String>, 
         .collect::<Vec<_>>()
         .join(",");
     Ok(Some(sel))
+}
+
+/// Wire security profile -> CRD. Previously dropped, so a `Restricted` request
+/// silently ran `Default` (fail-open); now it reaches the guest.
+fn map_security(p: WireSecurityProfile) -> SecurityProfile {
+    match p {
+        WireSecurityProfile::Default => SecurityProfile::Default,
+        WireSecurityProfile::Restricted => SecurityProfile::Restricted,
+    }
+}
+
+fn map_rlimits(rlimits: &[CloudRlimit]) -> Vec<Rlimit> {
+    rlimits
+        .iter()
+        .map(|r| Rlimit {
+            resource: map_rlimit_resource(r.resource),
+            soft: r.soft,
+            hard: r.hard,
+        })
+        .collect()
+}
+
+fn map_rlimit_resource(r: CloudRlimitResource) -> RlimitResource {
+    use CloudRlimitResource as W;
+    match r {
+        W::Cpu => RlimitResource::Cpu,
+        W::Fsize => RlimitResource::Fsize,
+        W::Data => RlimitResource::Data,
+        W::Stack => RlimitResource::Stack,
+        W::Core => RlimitResource::Core,
+        W::Rss => RlimitResource::Rss,
+        W::Nproc => RlimitResource::Nproc,
+        W::Nofile => RlimitResource::Nofile,
+        W::Memlock => RlimitResource::Memlock,
+        W::As => RlimitResource::As,
+        W::Locks => RlimitResource::Locks,
+        W::Sigpending => RlimitResource::Sigpending,
+        W::Msgqueue => RlimitResource::Msgqueue,
+        W::Nice => RlimitResource::Nice,
+        W::Rtprio => RlimitResource::Rtprio,
+        W::Rttime => RlimitResource::Rttime,
+    }
 }
 
 /// CRD phase -> the six-variant wire status.
@@ -358,6 +404,22 @@ mod tests {
     fn managed_by_label_is_always_stamped() {
         let SpecMapping { labels, .. } = request_to_spec(&req()).unwrap();
         assert_eq!(labels.get(MANAGED_BY_KEY).unwrap(), MANAGED_BY_VALUE);
+    }
+
+    #[test]
+    fn security_and_rlimits_map_through() {
+        let mut r = req();
+        r.spec.security_profile = WireSecurityProfile::Restricted;
+        r.spec.rlimits = vec![CloudRlimit {
+            resource: CloudRlimitResource::Nofile,
+            soft: 1024,
+            hard: 2048,
+        }];
+        let SpecMapping { spec, .. } = request_to_spec(&r).unwrap();
+        assert_eq!(spec.security_profile, SecurityProfile::Restricted);
+        assert_eq!(spec.rlimits.len(), 1);
+        assert_eq!(spec.rlimits[0].resource, RlimitResource::Nofile);
+        assert_eq!((spec.rlimits[0].soft, spec.rlimits[0].hard), (1024, 2048));
     }
 
     #[test]
