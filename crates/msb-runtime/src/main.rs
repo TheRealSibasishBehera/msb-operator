@@ -109,10 +109,28 @@ async fn main() -> Result<()> {
         .cpus(spec.cpus as u8)
         .memory(spec.memory);
 
+    if !spec.entrypoint.is_empty() {
+        builder = builder.entrypoint(spec.entrypoint.clone());
+    }
     if !spec.cmd.is_empty() {
         // Background (detached) launch: the VM stops when the command exits
         // (run-to-completion). Foreground is the attached, one-shot `msb run` path.
         builder = builder.background_command(spec.cmd.clone());
+    }
+    for e in &spec.env {
+        builder = builder.env(&e.name, &e.value);
+    }
+    if let Some(w) = &spec.workdir {
+        builder = builder.workdir(w);
+    }
+    if let Some(s) = &spec.shell {
+        builder = builder.shell(s);
+    }
+    if let Some(u) = &spec.user {
+        builder = builder.user(u);
+    }
+    if let Some(h) = &spec.hostname {
+        builder = builder.hostname(h);
     }
 
     // The VM launcher enforces these, so no controller-side deadline is needed.
