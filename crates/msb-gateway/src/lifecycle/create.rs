@@ -63,8 +63,7 @@ pub async fn create(
         return e.into_response();
     }
 
-    // Inbound map (validates the name) → spec + annotations.
-    let (spec, ann) = match convert::request_to_spec(&req) {
+    let mapping = match convert::request_to_spec(&req) {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -74,14 +73,15 @@ pub async fn create(
         metadata: ObjectMeta {
             name: Some(name.clone()),
             namespace: Some(id.namespace.clone()),
-            annotations: if ann.is_empty() {
+            labels: Some(mapping.labels.into_iter().collect::<BTreeMap<_, _>>()),
+            annotations: if mapping.annotations.is_empty() {
                 None
             } else {
-                Some(ann.into_iter().collect::<BTreeMap<_, _>>())
+                Some(mapping.annotations.into_iter().collect::<BTreeMap<_, _>>())
             },
             ..Default::default()
         },
-        spec,
+        spec: mapping.spec,
         status: None,
     };
 
