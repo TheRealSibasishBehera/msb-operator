@@ -3044,6 +3044,7 @@ dependencies = [
  "clap",
  "k8s-openapi",
  "microsandbox",
+ "microsandbox-network",
  "msb-crd",
  "serde_json",
  "tempfile",

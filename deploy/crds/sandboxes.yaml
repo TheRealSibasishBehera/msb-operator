@@ -272,23 +272,6 @@ spec:
                 description: User the guest workload runs as (name, uid, or `uid:gid`).
                 nullable: true
                 type: string
-              volumes:
-                description: Named volumes (node-local in V1).
-                items:
-                  properties:
-                    mountPath:
-                      type: string
-                    name:
-                      type: string
-                    size:
-                      description: Volume size as a Kubernetes resource.Quantity string (e.g. "10Gi").
-                      type: string
-                  required:
-                  - mountPath
-                  - name
-                  - size
-                  type: object
-                type: array
               workdir:
                 description: Working directory for guest commands.
                 nullable: true

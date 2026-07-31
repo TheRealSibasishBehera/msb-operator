@@ -126,7 +126,6 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         secrets: Vec::new(),
         network: Default::default(),
         upper: Default::default(),
-        volumes: Vec::new(),
     };
 
     let mut ann = BTreeMap::new();

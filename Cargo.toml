@@ -24,9 +24,9 @@ unsafe_code = "forbid"
 all = { level = "deny", priority = -1 }
 
 [workspace.dependencies]
-# One upstream release; pin both exact and bump together.
 microsandbox = { version = "=0.6.8", default-features = false }
 microsandbox-types = "=0.6.8"
+microsandbox-network = "=0.6.8"
 
 # kube ecosystem
 kube = { version = "4.0", features = ["runtime", "derive", "client"] }

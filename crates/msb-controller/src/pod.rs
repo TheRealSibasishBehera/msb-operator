@@ -453,7 +453,6 @@ pub(crate) mod test_support {
                 secrets: Vec::new(),
                 network: Default::default(),
                 upper: Default::default(),
-                volumes: Vec::new(),
             },
             status: None,
         }
