@@ -43,7 +43,7 @@ spec:
           spec:
             properties:
               cmd:
-                description: Command to run inside the guest. Defaults to the image entrypoint.
+                description: Command to run inside the guest. Defaults to the image entrypoint. This field is immutable.
                 items:
                   type: string
                 type: array
@@ -52,7 +52,7 @@ spec:
                   rule: self == oldSelf
               cpus:
                 default: 1
-                description: Number of vCPUs.
+                description: Number of vCPUs. This field is immutable.
                 format: uint32
                 minimum: 0.0
                 type: integer
@@ -70,7 +70,7 @@ spec:
                 - Stopped
                 type: string
               entrypoint:
-                description: Override the image entrypoint. Empty keeps the image's own entrypoint.
+                description: Override the image entrypoint. Empty keeps the image's own entrypoint. This field is immutable.
                 items:
                   type: string
                 type: array
@@ -78,7 +78,7 @@ spec:
                 - message: spec.entrypoint is immutable after creation
                   rule: self == oldSelf
               env:
-                description: Plain (non-secret) environment variables set in the guest.
+                description: Plain (non-secret) environment variables set in the guest. This field is immutable.
                 items:
                   description: A plain (non-secret) environment variable set in the guest.
                   properties:
@@ -96,20 +96,20 @@ spec:
                   rule: self == oldSelf
               ephemeral:
                 default: false
-                description: Whether to delete the Sandbox CRD after the sandbox exits.
+                description: Whether to delete the Sandbox CRD after the sandbox exits. This field is immutable.
                 type: boolean
                 x-kubernetes-validations:
                 - message: spec.ephemeral is immutable after creation
                   rule: self == oldSelf
               hostname:
-                description: Guest hostname.
+                description: Guest hostname. This field is immutable.
                 nullable: true
                 type: string
                 x-kubernetes-validations:
                 - message: spec.hostname is immutable after creation
                   rule: self == oldSelf
               idleTimeoutSecs:
-                description: Stop the sandbox after this many seconds with no activity.
+                description: Stop the sandbox after this many seconds with no activity. This field is immutable.
                 format: uint64
                 minimum: 0.0
                 nullable: true
@@ -118,7 +118,7 @@ spec:
                 - message: spec.idleTimeoutSecs is immutable after creation
                   rule: self == oldSelf
               image:
-                description: OCI image for the guest root filesystem.
+                description: OCI image for the guest root filesystem. This field is immutable.
                 type: string
                 x-kubernetes-validations:
                 - message: spec.image is immutable after creation
@@ -126,7 +126,7 @@ spec:
               logging:
                 default:
                   guestConsole: false
-                description: Guest console log capture, opt-in.
+                description: Guest console log capture, opt-in. This field is immutable.
                 properties:
                   guestConsole:
                     default: false
@@ -136,7 +136,7 @@ spec:
                 - message: spec.logging is immutable after creation
                   rule: self == oldSelf
               maxDurationSecs:
-                description: Hard cap on total sandbox lifetime, in seconds.
+                description: Hard cap on total sandbox lifetime, in seconds. This field is immutable.
                 format: uint64
                 minimum: 0.0
                 nullable: true
@@ -146,7 +146,7 @@ spec:
                   rule: self == oldSelf
               memory:
                 default: 512
-                description: Memory in MiB.
+                description: Memory in MiB. This field is immutable.
                 format: uint32
                 minimum: 0.0
                 type: integer
@@ -165,7 +165,7 @@ spec:
                   tls:
                     intercept: false
                   trustHostCas: false
-                description: Network configuration.
+                description: Network configuration. This field is immutable.
                 properties:
                   dns:
                     default:
@@ -270,7 +270,7 @@ spec:
                 - message: spec.network is immutable after creation
                   rule: self == oldSelf
               rlimits:
-                description: POSIX resource limits applied to guest processes at agentd startup.
+                description: POSIX resource limits applied to guest processes at agentd startup. This field is immutable.
                 items:
                   description: A POSIX resource limit applied to guest processes.
                   properties:
@@ -315,7 +315,7 @@ spec:
                   rule: self == oldSelf
               runPolicy:
                 default: Once
-                description: Restart policy on failure.
+                description: Restart policy on failure. This field is immutable.
                 enum:
                 - Once
                 - RerunOnFailure
@@ -324,7 +324,7 @@ spec:
                 - message: spec.runPolicy is immutable after creation
                   rule: self == oldSelf
               secrets:
-                description: Secrets injected as env vars inside the guest via the smoltcp proxy.
+                description: Secrets injected as env vars inside the guest via the smoltcp proxy. This field is immutable.
                 items:
                   properties:
                     allowedHosts:
@@ -361,7 +361,7 @@ spec:
                   rule: self == oldSelf
               securityProfile:
                 default: Default
-                description: In-guest hardening applied to exec sessions.
+                description: In-guest hardening applied to exec sessions. This field is immutable.
                 enum:
                 - Default
                 - Restricted
@@ -370,7 +370,7 @@ spec:
                 - message: spec.securityProfile is immutable after creation
                   rule: self == oldSelf
               shell:
-                description: Default shell for guest sessions.
+                description: Default shell for guest sessions. This field is immutable.
                 nullable: true
                 type: string
                 x-kubernetes-validations:
@@ -379,7 +379,7 @@ spec:
               upper:
                 default:
                   size: 4Gi
-                description: Writable overlay layer configuration.
+                description: Writable overlay layer configuration. This field is immutable.
                 properties:
                   size:
                     default: 4Gi
@@ -390,14 +390,14 @@ spec:
                 - message: spec.upper is immutable after creation
                   rule: self == oldSelf
               user:
-                description: User the guest workload runs as (name, uid, or `uid:gid`).
+                description: User the guest workload runs as (name, uid, or `uid:gid`). This field is immutable.
                 nullable: true
                 type: string
                 x-kubernetes-validations:
                 - message: spec.user is immutable after creation
                   rule: self == oldSelf
               workdir:
-                description: Working directory for guest commands.
+                description: Working directory for guest commands. This field is immutable.
                 nullable: true
                 type: string
                 x-kubernetes-validations:
