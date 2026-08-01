@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 #[kube(schema = "derived")]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxSpec {
-    /// OCI image for the guest root filesystem.
+    /// OCI image for the guest root filesystem. This field is immutable.
     pub image: String,
 
     /// Desired lifecycle state. `Stopped` removes the pod but keeps the Sandbox,
@@ -32,79 +32,79 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub desired_state: DesiredState,
 
-    /// Number of vCPUs.
+    /// Number of vCPUs. This field is immutable.
     #[serde(default = "default_cpus")]
     pub cpus: u32,
 
-    /// Memory in MiB.
+    /// Memory in MiB. This field is immutable.
     #[serde(default = "default_memory_mib")]
     pub memory: u32,
 
-    /// Command to run inside the guest. Defaults to the image entrypoint.
+    /// Command to run inside the guest. Defaults to the image entrypoint. This field is immutable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cmd: Vec<String>,
 
-    /// Override the image entrypoint. Empty keeps the image's own entrypoint.
+    /// Override the image entrypoint. Empty keeps the image's own entrypoint. This field is immutable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entrypoint: Vec<String>,
 
-    /// Plain (non-secret) environment variables set in the guest.
+    /// Plain (non-secret) environment variables set in the guest. This field is immutable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
 
-    /// Working directory for guest commands.
+    /// Working directory for guest commands. This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
 
-    /// Default shell for guest sessions.
+    /// Default shell for guest sessions. This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
 
-    /// User the guest workload runs as (name, uid, or `uid:gid`).
+    /// User the guest workload runs as (name, uid, or `uid:gid`). This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// Guest hostname.
+    /// Guest hostname. This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
 
-    /// Whether to delete the Sandbox CRD after the sandbox exits.
+    /// Whether to delete the Sandbox CRD after the sandbox exits. This field is immutable.
     #[serde(default)]
     pub ephemeral: bool,
 
-    /// Hard cap on total sandbox lifetime, in seconds.
+    /// Hard cap on total sandbox lifetime, in seconds. This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_duration_secs: Option<u64>,
 
-    /// Stop the sandbox after this many seconds with no activity.
+    /// Stop the sandbox after this many seconds with no activity. This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
 
-    /// Restart policy on failure.
+    /// Restart policy on failure. This field is immutable.
     #[serde(default)]
     pub run_policy: RunPolicy,
 
-    /// Secrets injected as env vars inside the guest via the smoltcp proxy.
+    /// Secrets injected as env vars inside the guest via the smoltcp proxy. This field is immutable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<SecretEntry>,
 
-    /// Network configuration.
+    /// Network configuration. This field is immutable.
     #[serde(default)]
     pub network: NetworkSpec,
 
-    /// Writable overlay layer configuration.
+    /// Writable overlay layer configuration. This field is immutable.
     #[serde(default)]
     pub upper: UpperSpec,
 
-    /// In-guest hardening applied to exec sessions.
+    /// In-guest hardening applied to exec sessions. This field is immutable.
     #[serde(default)]
     pub security_profile: SecurityProfile,
 
-    /// POSIX resource limits applied to guest processes at agentd startup.
+    /// POSIX resource limits applied to guest processes at agentd startup. This field is immutable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rlimits: Vec<Rlimit>,
 
-    /// Guest console log capture, opt-in.
+    /// Guest console log capture, opt-in. This field is immutable.
     #[serde(default)]
     pub logging: LoggingSpec,
 }
