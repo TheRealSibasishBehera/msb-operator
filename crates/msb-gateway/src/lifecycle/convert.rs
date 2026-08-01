@@ -130,6 +130,7 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         upper: Default::default(),
         security_profile: map_security(spec.security_profile),
         rlimits: map_rlimits(&spec.rlimits),
+        logging: Default::default(),
     };
 
     let mut ann = BTreeMap::new();

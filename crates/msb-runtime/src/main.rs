@@ -6,6 +6,7 @@
 //! process has to live as long as the sandbox does.
 
 mod cache_wait;
+mod console_log;
 mod net;
 mod secrets;
 
@@ -22,11 +23,27 @@ use msb_crd::sandbox::{RlimitResource as CrdRlimitResource, SecurityProfile as C
 use msb_crd::{ResolvedSecret, SandboxSpec};
 use tracing::info;
 
+// No subcommand runs the boot path; the console-log sidecar passes `console-log`.
 #[derive(Parser)]
 #[command(name = "msb-runtime")]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+
+    #[command(flatten)]
+    boot: BootArgs,
+}
+
+#[derive(clap::Subcommand)]
+enum Cmd {
+    /// Tail the guest's captured stdout/stderr and print JSON lines to stdout.
+    ConsoleLog(console_log::ConsoleLogArgs),
+}
+
+#[derive(Parser)]
+struct BootArgs {
     /// Sandbox spec as JSON (plain, from the controller).
-    #[arg(long, env = "MSB_SANDBOX_SPEC")]
+    #[arg(long, env = "MSB_SANDBOX_SPEC", required = false, default_value = "")]
     spec: String,
 
     /// msb's flat sandbox name (encoded namespace/name).
@@ -124,6 +141,21 @@ fn resolve_secrets(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    if let Some(Cmd::ConsoleLog(args)) = cli.cmd {
+        // Its own logs must never land on stdout — stdout is reserved for the
+        // JSON guest lines the gateway parses.
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .init();
+        return console_log::run(args).await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -136,7 +168,7 @@ async fn main() -> Result<()> {
     let phase =
         |name: &str| info!(elapsed_ms = t0.elapsed().as_millis() as u64, phase = name, "boot phase");
 
-    let cli = Cli::parse();
+    let cli = cli.boot;
     let spec: SandboxSpec = serde_json::from_str(&cli.spec).context("parsing MSB_SANDBOX_SPEC")?;
     phase("parsed spec");
 

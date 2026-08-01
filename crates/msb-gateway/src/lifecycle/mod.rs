@@ -20,10 +20,5 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/v1/sandboxes/by-name/:name/start", post(handlers::start))
         .route("/v1/sandboxes/by-name/:name/stop", post(handlers::stop))
-        // Deferred logs route: return a clean error rather than 404, never hang.
-        .route("/v1/sandboxes/:name/logs", get(logs_unimplemented))
-}
-
-async fn logs_unimplemented() -> crate::error::GatewayError {
-    crate::error::GatewayError::NotImplemented("logs streaming is not implemented in V1".into())
+        .route("/v1/sandboxes/:name/logs", get(crate::logs::logs_handler))
 }
