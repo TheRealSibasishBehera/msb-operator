@@ -2,8 +2,8 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// CEL immutability: all spec fields are sealed at creation time.
-// The API server enforces this server-side; the controller never needs to check.
+// Per-field CEL immutability: every field except `desiredState` is sealed at
+// creation. The API server enforces it server-side; the controller never checks.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "sandbox.microsandbox.dev",
@@ -25,6 +25,12 @@ use serde::{Deserialize, Serialize};
 pub struct SandboxSpec {
     /// OCI image for the guest root filesystem.
     pub image: String,
+
+    /// Desired lifecycle state. `Stopped` removes the pod but keeps the Sandbox,
+    /// restartable by setting `Running`. On the current storage model a restart is
+    /// a fresh boot (guest state is not preserved). Mutable.
+    #[serde(default)]
+    pub desired_state: DesiredState,
 
     /// Number of vCPUs.
     #[serde(default = "default_cpus")]
@@ -483,8 +489,20 @@ pub struct SandboxCondition {
 pub enum SandboxPhase {
     Pending,
     Running,
+    /// At rest by `desiredState: Stopped` — no pod, but restartable. Distinct from
+    /// `Succeeded`/`Failed`, which are the guest exiting on its own.
+    Stopped,
     Succeeded,
     Failed,
+}
+
+/// Desired lifecycle state the user sets on `spec.desiredState`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum DesiredState {
+    #[default]
+    Running,
+    Stopped,
 }
 
 /// Termination reason sourced from the daemon annotation or inferred by the controller.
@@ -560,6 +578,7 @@ mod tests {
             security_profile: SecurityProfile::default(),
             rlimits: vec![],
             logging: Default::default(),
+            desired_state: Default::default(),
         };
         assert_eq!(spec.cpus, 1);
         assert_eq!(spec.memory, 512);

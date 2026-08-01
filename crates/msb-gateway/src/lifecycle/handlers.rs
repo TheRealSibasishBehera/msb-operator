@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use kube::api::{DeleteParams, ListParams};
+use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
 use kube::Api;
 use microsandbox_types::{CloudMessageResponse, CloudPaginated};
 use msb_crd::Sandbox;
@@ -112,43 +112,42 @@ pub async fn delete(
     }
 }
 
-/// `POST /v1/sandboxes/by-name/:name/stop` — V1 stop is delete.
+/// `POST /v1/sandboxes/by-name/:name/stop` — set `spec.desiredState: Stopped`; the
+/// Sandbox persists and is restartable.
 pub async fn stop(
     State(state): State<AppState>,
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let id = match authed(&state, &headers, "delete", Some(&name)).await {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
-    let api = api(&state, &id.namespace);
-    // Capture before deleting so we can return a coherent response.
-    let sb = match api.get(&name).await {
-        Ok(sb) => sb,
-        Err(e) => return map_kube(&name, e).into_response(),
-    };
-    if let Err(e) = api.delete(&name, &DeleteParams::default()).await {
-        return map_kube(&name, e).into_response();
-    }
-    // Report it as Stopping regardless of its pre-delete phase.
-    let mut cloud = convert::sandbox_to_cloud(&sb, &id.namespace);
-    cloud.status = microsandbox_types::CloudSandboxStatus::Stopping;
-    Json(cloud).into_response()
+    set_desired_state(state, name, headers, "Stopped").await
 }
 
-/// `POST /v1/sandboxes/by-name/:name/start` — no-op; our sandboxes auto-start.
+/// `POST /v1/sandboxes/by-name/:name/start` — set `spec.desiredState: Running`.
 pub async fn start(
     State(state): State<AppState>,
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    // A no-op read of current state; authorize as `get`.
-    let id = match authed(&state, &headers, "get", Some(&name)).await {
+    set_desired_state(state, name, headers, "Running").await
+}
+
+async fn set_desired_state(
+    state: AppState,
+    name: String,
+    headers: HeaderMap,
+    desired: &str,
+) -> Response {
+    // Editing the spec is an update; authorize the SDK's start/stop as `patch`.
+    let id = match authed(&state, &headers, "patch", Some(&name)).await {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    match api(&state, &id.namespace).get(&name).await {
+    let api = api(&state, &id.namespace);
+    let patch = serde_json::json!({ "spec": { "desiredState": desired } });
+    match api
+        .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
         Ok(sb) => Json(convert::sandbox_to_cloud(&sb, &id.namespace)).into_response(),
         Err(e) => map_kube(&name, e).into_response(),
     }

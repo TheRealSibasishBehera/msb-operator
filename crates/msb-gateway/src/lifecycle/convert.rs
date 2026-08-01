@@ -131,6 +131,7 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         security_profile: map_security(spec.security_profile),
         rlimits: map_rlimits(&spec.rlimits),
         logging: Default::default(),
+        desired_state: Default::default(),
     };
 
     let mut ann = BTreeMap::new();
@@ -237,7 +238,7 @@ pub fn phase_to_status(
     }
     match phase {
         Some(SandboxPhase::Running) => CloudSandboxStatus::Running,
-        Some(SandboxPhase::Succeeded) => CloudSandboxStatus::Stopped,
+        Some(SandboxPhase::Stopped) | Some(SandboxPhase::Succeeded) => CloudSandboxStatus::Stopped,
         Some(SandboxPhase::Failed) => CloudSandboxStatus::Failed,
         _ if has_started => CloudSandboxStatus::Starting,
         _ => CloudSandboxStatus::Created,
@@ -452,6 +453,7 @@ mod tests {
         use CloudSandboxStatus::*;
         assert!(matches!(phase_to_status(Some(SandboxPhase::Running), false, true), Running));
         assert!(matches!(phase_to_status(Some(SandboxPhase::Succeeded), false, true), Stopped));
+        assert!(matches!(phase_to_status(Some(SandboxPhase::Stopped), false, true), Stopped));
         assert!(matches!(phase_to_status(Some(SandboxPhase::Failed), false, true), Failed));
         // terminating overrides everything
         assert!(matches!(phase_to_status(Some(SandboxPhase::Running), true, true), Stopping));
