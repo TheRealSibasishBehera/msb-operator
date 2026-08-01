@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use axum::response::IntoResponse;
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -54,11 +55,12 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let sock_path = socket::socket_path(&cli.msb_home, &cli.sandbox_name);
+    let control_sock_path = socket::control_socket_path(&sock_path);
     // Healthy once we have served at least one connection whose socket dial
     // succeeded (the sandbox is up and reachable).
     let ready = Arc::new(AtomicBool::new(false));
 
-    tokio::spawn(serve_health(cli.health_port, ready.clone()));
+    tokio::spawn(serve_health(cli.health_port, ready.clone(), control_sock_path));
 
     let listener = TcpListener::bind(("0.0.0.0", cli.port))
         .await
@@ -141,8 +143,23 @@ async fn proxy(
     }
 }
 
-/// Minimal `/healthz`: 200 once a connection has been served, else 503.
-async fn serve_health(port: u16, ready: Arc<AtomicBool>) {
+#[derive(Clone)]
+struct HttpState {
+    ready: Arc<AtomicBool>,
+    control_sock_path: Arc<PathBuf>,
+}
+
+/// Serves `/healthz` (200 once a connection has been served, else 503) and
+/// `POST /control` (relays the request body to the sandbox's control socket).
+async fn serve_health(port: u16, ready: Arc<AtomicBool>, control_sock_path: PathBuf) {
+    let state = HttpState {
+        ready,
+        control_sock_path: Arc::new(control_sock_path),
+    };
+    let app = axum::Router::new()
+        .route("/healthz", axum::routing::get(healthz))
+        .route("/control", axum::routing::post(control))
+        .with_state(state);
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
         Err(e) => {
@@ -150,29 +167,80 @@ async fn serve_health(port: u16, ready: Arc<AtomicBool>) {
             return;
         }
     };
-    loop {
-        let Ok((mut conn, _)) = listener.accept().await else {
-            continue;
-        };
-        let ready = ready.clone();
-        tokio::spawn(async move {
-            // Read (and discard) the request so the client sees a complete
-            // exchange, then reply.
-            let mut buf = [0u8; 1024];
-            let _ = conn.read(&mut buf).await;
-            let (status, body) = if ready.load(Ordering::Relaxed) {
-                ("200 OK", "ok")
-            } else {
-                ("503 Service Unavailable", "not ready")
-            };
-            let resp = format!(
-                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = conn.write_all(resp.as_bytes()).await;
-            let _ = conn.shutdown().await;
-        });
+    if let Err(e) = axum::serve(listener, app).await {
+        warn!(error = %e, "health/control server exited");
     }
+}
+
+async fn healthz(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+) -> axum::response::Response {
+    if state.ready.load(Ordering::Relaxed) {
+        (axum::http::StatusCode::OK, "ok").into_response()
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
+    }
+}
+
+async fn control(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let (status, body) = relay_control(&state.control_sock_path, &body).await;
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
+/// Relays one control request line verbatim to `<sandbox>.control.sock` and
+/// returns its reply. A dumb pipe: the bridge never parses `ControlRequest`/
+/// `ControlResponse`, so it stays correct across control-protocol versions.
+async fn relay_control(control_sock_path: &std::path::Path, body: &[u8]) -> (axum::http::StatusCode, Vec<u8>) {
+    let mut sock = match tokio::net::UnixStream::connect(control_sock_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("{{\"ok\":false,\"error\":\"control socket unreachable: {e}\"}}").into_bytes(),
+            );
+        }
+    };
+
+    let mut line = body.to_vec();
+    if line.last() != Some(&b'\n') {
+        line.push(b'\n');
+    }
+    if let Err(e) = sock.write_all(&line).await {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("{{\"ok\":false,\"error\":\"writing control request: {e}\"}}").into_bytes(),
+        );
+    }
+
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match sock.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                reply.extend_from_slice(&chunk[..n]);
+                if reply.contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("{{\"ok\":false,\"error\":\"reading control reply: {e}\"}}").into_bytes(),
+                );
+            }
+        }
+    }
+
+    (axum::http::StatusCode::OK, reply)
 }
 
 #[cfg(test)]
@@ -242,6 +310,61 @@ mod tests {
         assert_eq!(echoed.into_data(), b"hello");
 
         assert!(ready.load(Ordering::Relaxed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A fake control listener: reads one line, replies with the given payload,
+    // then closes — mirroring microsandbox_runtime's one-request-per-connection
+    // control protocol.
+    async fn fake_control_socket(path: std::path::PathBuf, reply: &'static [u8]) {
+        let listener = UnixListener::bind(&path).unwrap();
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let mut line = Vec::new();
+        loop {
+            let n = sock.read(&mut buf).await.unwrap();
+            line.extend_from_slice(&buf[..n]);
+            if line.contains(&b'\n') || n == 0 {
+                break;
+            }
+        }
+        sock.write_all(reply).await.unwrap();
+    }
+
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("msb-bridge-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn relay_control_forwards_the_request_and_returns_the_reply() {
+        let dir = test_dir("control-ok");
+        let sock_path = dir.join("s.control.sock");
+        let _ = std::fs::remove_file(&sock_path);
+
+        let reply = b"{\"ok\":true,\"cpu\":{\"possible\":2,\"requested_online\":2,\"actual_online\":2,\"enforced\":2}}\n";
+        tokio::spawn(fake_control_socket(sock_path.clone(), reply));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (status, body) =
+            relay_control(&sock_path, br#"{"op":"cpu_target","online":2}"#).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body, reply);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn relay_control_reports_503_when_the_socket_is_missing() {
+        let dir = test_dir("control-missing");
+        let sock_path = dir.join("does-not-exist.control.sock");
+
+        let (status, body) = relay_control(&sock_path, br#"{"op":"capabilities"}"#).await;
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.contains("\"ok\":false"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

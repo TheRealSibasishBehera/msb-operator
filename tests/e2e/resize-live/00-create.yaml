@@ -1,0 +1,17 @@
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-resize
+spec:
+  # Boots at cpus:1/memory:512 but reserves a maxCpus:2/maxMemory:1024 envelope,
+  # so the VMM parks the extra vCPU slot and hotplug memory region at boot. That
+  # spare envelope is what a later live resize reveals — without it a resize is
+  # RestartRequired (see the resize-restart-required case). Idle boot (no cmd) so
+  # the case can exec `nproc` in the guest.
+  image: "alpine:3.20"
+  cpus: 1
+  memory: 512
+  maxCpus: 2
+  maxMemory: 1024
+  ephemeral: false
+  runPolicy: Once

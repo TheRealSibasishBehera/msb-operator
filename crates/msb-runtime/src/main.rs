@@ -193,7 +193,9 @@ async fn main() -> Result<()> {
         .image(spec.image.clone())
         .pull_policy(PullPolicy::Never)
         .cpus(spec.cpus as u8)
-        .memory(spec.memory);
+        .memory(spec.memory)
+        .max_cpus(spec.effective_max_cpus() as u8)
+        .max_memory(spec.effective_max_memory());
 
     // Writable overlay ("upper") capacity for the guest's `/`. Unset in the CRD
     // defaults to msb's own 4 GiB, so this only bites when the user overrides.

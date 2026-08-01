@@ -5,6 +5,7 @@
 use msb_crd::SandboxCondition;
 
 pub const READY: &str = "Ready";
+pub const RESTART_REQUIRED: &str = "RestartRequired";
 
 /// Upsert by `type`, keeping the prior `last_transition_time` unless `status`
 /// changed (see module docs).
@@ -22,6 +23,20 @@ pub fn set(conditions: &mut Vec<SandboxCondition>, mut condition: SandboxConditi
 pub fn ready(status: bool, reason: &str, message: &str, now: String) -> SandboxCondition {
     SandboxCondition {
         type_: READY.to_string(),
+        status: if status { "True" } else { "False" }.to_string(),
+        reason: reason.to_string(),
+        message: message.to_string(),
+        last_transition_time: now,
+    }
+}
+
+/// A `spec.cpus`/`spec.memory` edit that could not be applied live: the sandbox
+/// booted without hotplug headroom, or the control socket was unreachable. The
+/// controller never auto-restarts to apply it (a restart on the current storage
+/// model loses guest state) — the user restarts explicitly.
+pub fn restart_required(status: bool, reason: &str, message: &str, now: String) -> SandboxCondition {
+    SandboxCondition {
+        type_: RESTART_REQUIRED.to_string(),
         status: if status { "True" } else { "False" }.to_string(),
         reason: reason.to_string(),
         message: message.to_string(),

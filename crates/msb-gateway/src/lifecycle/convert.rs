@@ -105,6 +105,8 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         image,
         cpus: spec.resources.vcpus as u32,
         memory: spec.resources.memory_mib,
+        max_cpus: None,
+        max_memory: None,
         // msb's `cmd` is the argv (the common override); `entrypoint` overrides the
         // image entrypoint. Map each to its own CRD field.
         cmd: spec.runtime.cmd.clone().unwrap_or_default(),

@@ -3,6 +3,7 @@ mod config;
 mod controller;
 mod leader;
 mod pod;
+mod resize;
 mod service;
 
 use std::sync::Arc;
@@ -39,6 +40,11 @@ struct Cli {
     #[arg(long, default_value_t = 7000, env = "MSB_BRIDGE_PORT")]
     bridge_port: i32,
 
+    /// The bridge's health/control HTTP port, carrying `/healthz` and the
+    /// `/control` resize-relay route the controller POSTs resize requests to.
+    #[arg(long, default_value_t = 8080, env = "MSB_BRIDGE_CONTROL_PORT")]
+    bridge_control_port: i32,
+
     /// `RUST_LOG` stamped onto sandbox runtime containers (for boot debugging).
     #[arg(long, default_value = "info", env = "MSB_RUNTIME_LOG")]
     runtime_log: String,
@@ -71,7 +77,8 @@ async fn main() -> anyhow::Result<()> {
         cli.bridge_port,
     )
     .context("invalid controller configuration")?
-    .with_runtime_log(cli.runtime_log);
+    .with_runtime_log(cli.runtime_log)
+    .with_bridge_control_port(cli.bridge_control_port);
 
     let client = Client::try_default()
         .await
@@ -115,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
                     client,
                     config,
                     recorder,
+                    http: reqwest::Client::new(),
                 }),
             )
             .for_each(|res| async move {

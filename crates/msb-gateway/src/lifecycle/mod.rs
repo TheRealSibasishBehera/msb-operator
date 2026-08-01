@@ -15,10 +15,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/sandboxes", post(create::create).get(handlers::list))
         .route(
-            "/v1/sandboxes/by-name/:name",
+            "/v1/sandboxes/by-name/{name}",
             get(handlers::get).delete(handlers::delete),
         )
-        .route("/v1/sandboxes/by-name/:name/start", post(handlers::start))
-        .route("/v1/sandboxes/by-name/:name/stop", post(handlers::stop))
-        .route("/v1/sandboxes/:name/logs", get(crate::logs::logs_handler))
+        .route("/v1/sandboxes/by-name/{name}/start", post(handlers::start))
+        .route("/v1/sandboxes/by-name/{name}/stop", post(handlers::stop))
+        .route("/v1/sandboxes/{name}/logs", get(crate::logs::logs_handler))
 }

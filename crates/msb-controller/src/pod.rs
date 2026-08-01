@@ -240,7 +240,12 @@ fn runtime_container(
         ]),
         volume_mounts: Some(mounts),
         ports: published_container_ports(spec),
-        resources: Some(runtime_resources(spec.cpus, spec.memory)),
+        resources: Some(runtime_resources(
+            spec.cpus,
+            spec.memory,
+            spec.effective_max_cpus(),
+            spec.effective_max_memory(),
+        )),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),
             capabilities: Some(Capabilities {
@@ -255,27 +260,35 @@ fn runtime_container(
     }
 }
 
-/// Resources for the runtime container. Memory request == limit (guest RAM +
-/// overhead): the guest has a hard `--memory-mib` ceiling, so a matching limit
-/// is safe and keeps a busy sandbox from OOMing its neighbours. CPU requests a
-/// fraction of a core and limits to the advertised vCPUs.
-fn runtime_resources(cpus: u32, memory_mib: u32) -> ResourceRequirements {
-    let mem_total = memory_mib as u64 + memory_overhead_mib(memory_mib as u64, cpus as u64);
-    let mem_qty = Quantity(format!("{mem_total}Mi"));
+/// Resources for the runtime container. Requests size to the effective
+/// (booted) guest: the reserved-but-unplugged headroom between effective and
+/// max is lazily faulted, so it costs no host RSS/CPU until the guest actually
+/// grows into it. Limits size to the max envelope: the cgroup is the hard
+/// ceiling the VMM's boot-time reservation can never exceed, so it must cover
+/// `maxCpus`/`maxMemory`, not just the effective values.
+fn runtime_resources(
+    cpus: u32,
+    memory_mib: u32,
+    max_cpus: u32,
+    max_memory_mib: u32,
+) -> ResourceRequirements {
+    let req_mem_total = memory_mib as u64 + memory_overhead_mib(memory_mib as u64, cpus as u64);
+    let lim_mem_total =
+        max_memory_mib as u64 + memory_overhead_mib(max_memory_mib as u64, max_cpus as u64);
     let cpu_request = Quantity(format!(
         "{}m",
         (cpus as u64 * 1000).div_ceil(CPU_ALLOCATION_RATIO)
     ));
-    let cpu_limit = Quantity(cpus.to_string());
+    let cpu_limit = Quantity(max_cpus.to_string());
     let ephemeral = Quantity(format!("{EPHEMERAL_STORAGE_MIB}Mi"));
 
     let requests = BTreeMap::from([
-        ("memory".to_string(), mem_qty.clone()),
+        ("memory".to_string(), Quantity(format!("{req_mem_total}Mi"))),
         ("cpu".to_string(), cpu_request),
         ("ephemeral-storage".to_string(), ephemeral),
     ]);
     let limits = BTreeMap::from([
-        ("memory".to_string(), mem_qty),
+        ("memory".to_string(), Quantity(format!("{lim_mem_total}Mi"))),
         ("cpu".to_string(), cpu_limit),
         (KVM_RESOURCE.to_string(), Quantity("1".to_string())),
     ]);
@@ -311,17 +324,30 @@ fn bridge_container(cfg: &ControllerConfig, flat_name: &str) -> Container {
                 ..Default::default()
             },
             EnvVar {
+                name: "MSB_BRIDGE_HEALTH_PORT".to_string(),
+                value: Some(cfg.bridge_control_port.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
                 name: "RUST_LOG".to_string(),
                 value: Some(cfg.runtime_log.clone()),
                 ..Default::default()
             },
         ]),
-        ports: Some(vec![ContainerPort {
-            name: Some("agent".to_string()),
-            container_port: cfg.bridge_port,
-            protocol: Some("TCP".to_string()),
-            ..Default::default()
-        }]),
+        ports: Some(vec![
+            ContainerPort {
+                name: Some("agent".to_string()),
+                container_port: cfg.bridge_port,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+            ContainerPort {
+                name: Some("control".to_string()),
+                container_port: cfg.bridge_control_port,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+        ]),
         // Gate the Service endpoint on the bridge having bound the port.
         readiness_probe: Some(Probe {
             tcp_socket: Some(TCPSocketAction {
@@ -495,6 +521,8 @@ pub(crate) mod test_support {
                 image: "python:3.12".to_string(),
                 cpus: 2,
                 memory: 1024,
+                max_cpus: None,
+                max_memory: None,
                 cmd: vec!["python".to_string(), "script.py".to_string()],
                 entrypoint: Vec::new(),
                 env: Vec::new(),
@@ -676,19 +704,19 @@ mod tests {
     }
 
     #[test]
-    fn runtime_memory_request_equals_limit_at_guest_plus_overhead() {
-        // Fixture: 2 vCPU, 1024Mi guest. overhead = 96 + 1024/512 + 8*2 = 114.
+    fn runtime_memory_request_equals_limit_when_no_max_is_set() {
+        // Fixture: 2 vCPU, 1024Mi guest, no maxMemory. overhead = 96 + 1024/512 + 8*2 = 114.
         let pod = build(&sandbox(), &config()).unwrap();
         let res = container(&pod, "msb-runtime").resources.as_ref().unwrap();
         let req = res.requests.as_ref().unwrap();
         let lim = res.limits.as_ref().unwrap();
         let expected = Quantity("1138Mi".to_string());
         assert_eq!(req.get("memory"), Some(&expected));
-        assert_eq!(lim.get("memory"), Some(&expected)); // Guaranteed for memory
+        assert_eq!(lim.get("memory"), Some(&expected));
     }
 
     #[test]
-    fn runtime_cpu_requests_a_fraction_and_limits_to_vcpus() {
+    fn runtime_cpu_requests_a_fraction_and_limits_to_vcpus_when_no_max_is_set() {
         let pod = build(&sandbox(), &config()).unwrap();
         let res = container(&pod, "msb-runtime").resources.as_ref().unwrap();
         assert_eq!(
@@ -699,6 +727,27 @@ mod tests {
             res.limits.as_ref().unwrap().get("cpu"),
             Some(&Quantity("2".to_string())) // limited to the advertised vCPUs
         );
+    }
+
+    #[test]
+    fn resize_headroom_splits_requests_from_limits() {
+        let mut sb = sandbox();
+        sb.spec.cpus = 1;
+        sb.spec.memory = 512;
+        sb.spec.max_cpus = Some(2);
+        sb.spec.max_memory = Some(1024);
+        let pod = build(&sb, &config()).unwrap();
+        let res = container(&pod, "msb-runtime").resources.as_ref().unwrap();
+        let req = res.requests.as_ref().unwrap();
+        let lim = res.limits.as_ref().unwrap();
+
+        // Requests size to the effective (booted) values: overhead = 96 + 512/512 + 8*1 = 105.
+        assert_eq!(req.get("memory"), Some(&Quantity("617Mi".to_string())));
+        assert_eq!(req.get("cpu"), Some(&Quantity("100m".to_string())));
+
+        // Limits size to the max envelope: overhead = 96 + 1024/512 + 8*2 = 114.
+        assert_eq!(lim.get("memory"), Some(&Quantity("1138Mi".to_string())));
+        assert_eq!(lim.get("cpu"), Some(&Quantity("2".to_string())));
     }
 
     #[test]
@@ -989,9 +1038,11 @@ mod tests {
             .ports
             .as_ref()
             .unwrap();
-        assert_eq!(ports.len(), 1);
+        assert_eq!(ports.len(), 2);
         assert_eq!(ports[0].container_port, 7000);
         assert_eq!(ports[0].name.as_deref(), Some("agent"));
+        assert_eq!(ports[1].container_port, 8080);
+        assert_eq!(ports[1].name.as_deref(), Some("control"));
     }
 
     #[test]

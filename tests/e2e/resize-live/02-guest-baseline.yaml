@@ -1,0 +1,18 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # Record the guest's boot CPU count and the pod's identity. The guest boots at
+  # the effective cpus (1) even though 2 vCPU slots exist, and the post-resize
+  # step must see the SAME pod UID — a live resize never recreates the pod.
+  - script: |
+      set -e
+      pod="sandbox-e2e-resize"
+      n=$(kubectl exec "$pod" -n "$NAMESPACE" -c msb-runtime -- \
+        msb exec "${NAMESPACE}__e2e-resize" -- nproc 2>/dev/null | tr -dc '0-9')
+      if [ "$n" != "1" ]; then
+        echo "FAIL: guest booted with nproc=$n, expected 1"; exit 1
+      fi
+      uid=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+      if [ -z "$uid" ]; then echo "FAIL: could not read pod UID"; exit 1; fi
+      printf '%s' "$uid" > /tmp/e2e-resize-pod-uid
+      echo "PASS: guest nproc=1 at boot, pod UID=$uid recorded"

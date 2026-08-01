@@ -55,9 +55,9 @@ pub async fn splice(
                     break;
                 }
             };
-            let bytes = match msg {
-                AxumMsg::Binary(data) => data,
-                AxumMsg::Text(t) => t.into_bytes(),
+            let bytes: Vec<u8> = match msg {
+                AxumMsg::Binary(data) => data.into(),
+                AxumMsg::Text(t) => t.as_bytes().to_vec(),
                 AxumMsg::Close(_) => break,
                 // pings/pongs are handled by the transport; nothing to forward.
                 _ => continue,
@@ -84,7 +84,7 @@ pub async fn splice(
                 TungMsg::Close(_) => break,
                 _ => continue,
             };
-            if client_tx.send(AxumMsg::Binary(bytes)).await.is_err() {
+            if client_tx.send(AxumMsg::Binary(bytes.into())).await.is_err() {
                 break;
             }
         }

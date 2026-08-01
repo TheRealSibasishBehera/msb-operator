@@ -52,16 +52,26 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig, name: &str, namespace: &
     }
 }
 
-/// The bridge port plus every published port. Callers are responsible for
-/// having rejected a published port that collides with the bridge port.
+/// The bridge port, the bridge's control port, and every published port.
+/// Callers are responsible for having rejected a published port that
+/// collides with the bridge port.
 fn service_ports(sandbox: &Sandbox, cfg: &ControllerConfig) -> Vec<ServicePort> {
-    let mut ports = vec![ServicePort {
-        name: Some("agent".to_string()),
-        port: cfg.bridge_port,
-        target_port: Some(IntOrString::Int(cfg.bridge_port)),
-        protocol: Some("TCP".to_string()),
-        ..Default::default()
-    }];
+    let mut ports = vec![
+        ServicePort {
+            name: Some("agent".to_string()),
+            port: cfg.bridge_port,
+            target_port: Some(IntOrString::Int(cfg.bridge_port)),
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        },
+        ServicePort {
+            name: Some("control".to_string()),
+            port: cfg.bridge_control_port,
+            target_port: Some(IntOrString::Int(cfg.bridge_control_port)),
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        },
+    ];
     for p in &sandbox.spec.network.published_ports {
         let host = i32::from(p.host_port());
         ports.push(ServicePort {
@@ -130,10 +140,21 @@ mod tests {
         use crate::pod::test_support::{config, sandbox_with_ports};
         let svc = build(&sandbox_with_ports(&[8000]), &config(), "my-sandbox", "team-a");
         let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
-        assert_eq!(ports.len(), 2, "bridge + one published");
+        assert_eq!(ports.len(), 3, "bridge + control + one published");
         assert_eq!(ports[0].name.as_deref(), Some("agent"));
-        assert_eq!(ports[1].name.as_deref(), Some("port-8000"));
-        assert_eq!(ports[1].port, 8000);
-        assert_eq!(ports[1].target_port, Some(IntOrString::Int(8000)));
+        assert_eq!(ports[1].name.as_deref(), Some("control"));
+        assert_eq!(ports[2].name.as_deref(), Some("port-8000"));
+        assert_eq!(ports[2].port, 8000);
+        assert_eq!(ports[2].target_port, Some(IntOrString::Int(8000)));
+    }
+
+    #[test]
+    fn service_exposes_the_bridge_control_port() {
+        use crate::pod::test_support::{config, sandbox};
+        let svc = build(&sandbox(), &config(), "my-sandbox", "team-a");
+        let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
+        let control = ports.iter().find(|p| p.name.as_deref() == Some("control")).unwrap();
+        assert_eq!(control.port, 8080);
+        assert_eq!(control.target_port, Some(IntOrString::Int(8080)));
     }
 }

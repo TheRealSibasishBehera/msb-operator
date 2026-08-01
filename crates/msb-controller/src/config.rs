@@ -47,6 +47,9 @@ pub struct ControllerConfig {
     pub runtime_image: String,
     pub bridge_image: String,
     pub bridge_port: i32,
+    /// The bridge's health/control HTTP port; carries both `/healthz` and the
+    /// `/control` resize-relay route.
+    pub bridge_control_port: i32,
     /// `RUST_LOG` stamped onto the runtime container so its boot is observable.
     pub runtime_log: String,
 }
@@ -75,8 +78,16 @@ impl ControllerConfig {
             runtime_image: runtime_image.into(),
             bridge_image: bridge_image.into(),
             bridge_port,
+            bridge_control_port: 8080,
             runtime_log: "info".to_string(),
         })
+    }
+
+    /// Sets the bridge's health/control HTTP port. Defaults to 8080, matching
+    /// the bridge's own `MSB_BRIDGE_HEALTH_PORT` default.
+    pub fn with_bridge_control_port(mut self, port: i32) -> Self {
+        self.bridge_control_port = port;
+        self
     }
 
     /// Sets the `RUST_LOG` the runtime container runs with.
