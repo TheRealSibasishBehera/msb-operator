@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
-        .route("/v1/sandboxes/:name/agent", get(exec_handler))
+        .route("/v1/sandboxes/{name}/agent", get(exec_handler))
         .merge(lifecycle::routes())
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);

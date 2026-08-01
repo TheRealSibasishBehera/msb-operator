@@ -1,0 +1,43 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # cpus/memory are mutable, but only up to the booted maxCpus/maxMemory envelope.
+  # A resize within the envelope is accepted; a resize beyond it is rejected by
+  # CEL at admission — the guest kernel could never online capacity the VMM did
+  # not reserve at boot, so the API refuses the edit rather than let it silently
+  # fail. This is admission-only (no boot); the live path is tested in the KVM
+  # e2e resize-live case.
+  - script: |
+      set -e
+      ns="$NAMESPACE"
+
+      # Within the envelope: accepted.
+      if ! kubectl patch sandbox test-resize-bounds -n "$ns" --type=merge \
+          -p '{"spec":{"cpus":2,"memory":512}}' >/dev/null 2>&1; then
+        echo "FAIL: resize to the max (cpus:2 memory:512) was rejected"; exit 1
+      fi
+      echo "ok: resize within the envelope accepted"
+
+      # cpus beyond maxCpus: rejected.
+      if kubectl patch sandbox test-resize-bounds -n "$ns" --type=merge \
+          -p '{"spec":{"cpus":3}}' 2>&1 | grep -q "must not exceed spec.maxCpus"; then
+        echo "ok: cpus beyond maxCpus rejected"
+      else
+        echo "FAIL: cpus:3 beyond maxCpus:2 was not rejected"; exit 1
+      fi
+
+      # memory beyond maxMemory: rejected.
+      if kubectl patch sandbox test-resize-bounds -n "$ns" --type=merge \
+          -p '{"spec":{"memory":1024}}' 2>&1 | grep -q "must not exceed spec.maxMemory"; then
+        echo "ok: memory beyond maxMemory rejected"
+      else
+        echo "FAIL: memory:1024 beyond maxMemory:512 was not rejected"; exit 1
+      fi
+
+      # maxCpus itself is immutable — you cannot grow the envelope after boot.
+      if kubectl patch sandbox test-resize-bounds -n "$ns" --type=merge \
+          -p '{"spec":{"maxCpus":4}}' 2>&1 | grep -q "immutable after creation"; then
+        echo "PASS: resize bounds enforced (within accepted, beyond and envelope-grow rejected)"
+      else
+        echo "FAIL: maxCpus was mutable — the boot envelope must be immutable"; exit 1
+      fi

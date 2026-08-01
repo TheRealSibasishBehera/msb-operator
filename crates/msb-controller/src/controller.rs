@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use crate::conditions;
 use crate::config::{ControllerConfig, FIELD_MANAGER};
 use crate::pod::{self, PodBuildError};
+use crate::resize;
 use crate::service;
 
 fn event(type_: EventType, reason: &str, note: &str) -> Event {
@@ -110,6 +111,8 @@ pub struct Context {
     pub client: Client,
     pub config: ControllerConfig,
     pub recorder: Recorder,
+    /// Reaches the per-sandbox bridge's `/control` relay for live resizes.
+    pub http: reqwest::Client,
 }
 
 pub fn error_policy(sandbox: Arc<Sandbox>, error: &Error, _ctx: Arc<Context>) -> Action {
@@ -307,7 +310,7 @@ async fn mark_running(
     name: &str,
 ) -> Result<Action, Error> {
     if sandbox.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&SandboxPhase::Running) {
-        return Ok(Action::await_change());
+        return reconcile_resize(sandbox, ctx, sandboxes, name).await;
     }
 
     let now = now_rfc3339();
@@ -339,6 +342,8 @@ async fn mark_running(
         // Preserve the retry count across the Pending→Running transition.
         restart_count: sandbox.status.as_ref().map(|s| s.restart_count).unwrap_or(0),
         exposed_ports,
+        applied_cpus: Some(sandbox.spec.cpus),
+        applied_memory: Some(sandbox.spec.memory),
         conditions,
         ..Default::default()
     };
@@ -352,6 +357,129 @@ async fn mark_running(
         .await
         .ok();
     info!(sandbox = %name, "running");
+    Ok(Action::await_change())
+}
+
+/// Whether `spec.cpus`/`spec.memory` differ from what was last confirmed
+/// applied — the signal that a resize is pending.
+fn resize_pending(sandbox: &Sandbox) -> bool {
+    let Some(status) = sandbox.status.as_ref() else {
+        return false;
+    };
+    status.applied_cpus != Some(sandbox.spec.cpus) || status.applied_memory != Some(sandbox.spec.memory)
+}
+
+/// Applies a pending `spec.cpus`/`spec.memory` edit to an already-Running
+/// sandbox: live over the bridge control endpoint when the sandbox booted with
+/// hotplug headroom, else `RestartRequired` — never a silent no-op, never an
+/// automatic restart (the current storage model loses guest state on one).
+async fn reconcile_resize(
+    sandbox: &Sandbox,
+    ctx: &Context,
+    sandboxes: &Api<Sandbox>,
+    name: &str,
+) -> Result<Action, Error> {
+    if !resize_pending(sandbox) {
+        return Ok(Action::await_change());
+    }
+
+    let now = now_rfc3339();
+    let mut conditions = prior_conditions(sandbox);
+
+    // A dimension with no reserved headroom can't hotplug (its control listener
+    // never spawned), so a change to it needs a restart. Skip the doomed attempt.
+    let cpus_changed = sandbox.status.as_ref().and_then(|s| s.applied_cpus) != Some(sandbox.spec.cpus);
+    let memory_changed =
+        sandbox.status.as_ref().and_then(|s| s.applied_memory) != Some(sandbox.spec.memory);
+    if (cpus_changed && !resize::cpus_have_headroom(&sandbox.spec))
+        || (memory_changed && !resize::memory_has_headroom(&sandbox.spec))
+    {
+        conditions::set(
+            &mut conditions,
+            conditions::restart_required(
+                true,
+                "NoHotplugHeadroom",
+                "spec.cpus/spec.memory changed but the sandbox booted without hotplug headroom \
+                 (set maxCpus/maxMemory above cpus/memory at creation); restart the sandbox \
+                 (desiredState Stopped then Running) to apply",
+                now,
+            ),
+        );
+        let status = json!({ "status": { "conditions": conditions } });
+        patch_status_merge(sandboxes, name, &status).await?;
+        warn!(sandbox = %name, "resize needs headroom the sandbox lacks; restart required");
+        return Ok(Action::await_change());
+    }
+
+    let Some(service_name) = sandbox
+        .status
+        .as_ref()
+        .and_then(|s| s.service_name.clone())
+    else {
+        return Ok(Action::requeue(REQUEUE_WHILE_PENDING));
+    };
+    let namespace = sandbox.namespace().ok_or_else(|| Error::MissingObjectKey {
+        sandbox: name.to_string(),
+        key: "namespace",
+    })?;
+    let url = resize::control_url(&service_name, &namespace, ctx.config.bridge_control_port);
+
+    let applied_cpus = sandbox.status.as_ref().and_then(|s| s.applied_cpus);
+    let applied_memory = sandbox.status.as_ref().and_then(|s| s.applied_memory);
+
+    let mut new_applied_cpus = applied_cpus;
+    let mut new_applied_memory = applied_memory;
+    let mut live_error = None;
+
+    if applied_cpus != Some(sandbox.spec.cpus) {
+        match resize::apply(&ctx.http, &url, &resize::cpu_target_request(sandbox.spec.cpus)).await {
+            Ok(_) => new_applied_cpus = Some(sandbox.spec.cpus),
+            Err(e) => live_error = Some(e.to_string()),
+        }
+    }
+    if live_error.is_none() && applied_memory != Some(sandbox.spec.memory) {
+        match resize::apply(
+            &ctx.http,
+            &url,
+            &resize::memory_target_request(sandbox.spec.memory),
+        )
+        .await
+        {
+            Ok(_) => new_applied_memory = Some(sandbox.spec.memory),
+            Err(e) => live_error = Some(e.to_string()),
+        }
+    }
+
+    if let Some(error) = live_error {
+        conditions::set(
+            &mut conditions,
+            conditions::restart_required(
+                true,
+                "ControlSocketUnreachable",
+                &format!(
+                    "live resize failed ({error}); restart the sandbox (desiredState Stopped \
+                     then Running) to apply spec.cpus/spec.memory"
+                ),
+                now,
+            ),
+        );
+        warn!(sandbox = %name, %error, "live resize failed; restart required");
+    } else {
+        conditions::set(
+            &mut conditions,
+            conditions::restart_required(false, "Resized", "resize applied live", now),
+        );
+        info!(sandbox = %name, cpus = new_applied_cpus, memory = new_applied_memory, "resized live");
+    }
+
+    let status = json!({
+        "status": {
+            "appliedCpus": new_applied_cpus,
+            "appliedMemory": new_applied_memory,
+            "conditions": conditions,
+        }
+    });
+    patch_status_merge(sandboxes, name, &status).await?;
     Ok(Action::await_change())
 }
 
@@ -425,6 +553,8 @@ async fn terminate(
             exit_code,
             restart_count: restart_count + 1,
             exposed_ports: prior.map(|s| s.exposed_ports.clone()).unwrap_or_default(),
+            applied_cpus: None,
+            applied_memory: None,
             conditions,
         }
     } else {
@@ -439,6 +569,9 @@ async fn terminate(
             exit_code,
             restart_count,
             exposed_ports: prior.map(|s| s.exposed_ports.clone()).unwrap_or_default(),
+            // The pod is terminating, so any pending resize no longer applies.
+            applied_cpus: None,
+            applied_memory: None,
             conditions,
         }
     };
@@ -517,6 +650,8 @@ async fn handle_vanished_pod(
         exit_code: None,
         restart_count: if retrying { restart_count + 1 } else { restart_count },
         exposed_ports: prior.map(|s| s.exposed_ports.clone()).unwrap_or_default(),
+        applied_cpus: if retrying { None } else { prior.and_then(|s| s.applied_cpus) },
+        applied_memory: if retrying { None } else { prior.and_then(|s| s.applied_memory) },
         conditions,
     };
     patch_status(sandboxes, name, &status).await?;
@@ -623,8 +758,18 @@ async fn patch_status(
     status: &SandboxStatus,
 ) -> Result<(), Error> {
     let patch = json!({ "status": status });
+    patch_status_merge(sandboxes, name, &patch).await
+}
+
+/// A merge patch of a partial status document, for updates (e.g. a resize)
+/// that touch only a few fields and must not clobber the rest by omission.
+async fn patch_status_merge(
+    sandboxes: &Api<Sandbox>,
+    name: &str,
+    patch: &serde_json::Value,
+) -> Result<(), Error> {
     sandboxes
-        .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
         .await
         .map_err(|source| Error::PatchStatus {
             sandbox: name.to_string(),
@@ -1021,6 +1166,43 @@ mod tests {
             });
             assert_eq!(was_running(&sb), expected, "{phase:?}");
         }
+    }
+
+    #[test]
+    fn resize_pending_is_false_with_no_status() {
+        assert!(!resize_pending(&sandbox()), "never booted, nothing applied yet");
+    }
+
+    #[test]
+    fn resize_pending_is_false_when_spec_matches_applied() {
+        let mut sb = sandbox();
+        sb.status = Some(SandboxStatus {
+            applied_cpus: Some(sb.spec.cpus),
+            applied_memory: Some(sb.spec.memory),
+            ..Default::default()
+        });
+        assert!(!resize_pending(&sb));
+    }
+
+    #[test]
+    fn resize_pending_is_true_when_cpus_or_memory_diverge() {
+        let mut sb = sandbox();
+        sb.status = Some(SandboxStatus {
+            applied_cpus: Some(sb.spec.cpus),
+            applied_memory: Some(sb.spec.memory),
+            ..Default::default()
+        });
+        sb.spec.cpus += 1;
+        assert!(resize_pending(&sb));
+
+        let mut sb2 = sandbox();
+        sb2.status = Some(SandboxStatus {
+            applied_cpus: Some(sb2.spec.cpus),
+            applied_memory: Some(sb2.spec.memory),
+            ..Default::default()
+        });
+        sb2.spec.memory += 1;
+        assert!(resize_pending(&sb2));
     }
 
     #[test]

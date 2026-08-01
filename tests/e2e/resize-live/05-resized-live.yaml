@@ -1,0 +1,34 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # The property the whole feature exists for: the guest kernel onlines the
+  # second vCPU in place, on the SAME pod, with no restart. Assert three things:
+  #   1. guest nproc is now 2 (the hotplugged CPU is online),
+  #   2. the pod UID is unchanged from the baseline (no recreation),
+  #   3. RestartRequired is False with reason Resized (applied live, not deferred).
+  - script: |
+      set -e
+      pod="sandbox-e2e-resize"
+
+      n=$(kubectl exec "$pod" -n "$NAMESPACE" -c msb-runtime -- \
+        msb exec "${NAMESPACE}__e2e-resize" -- nproc 2>/dev/null | tr -dc '0-9')
+      if [ "$n" != "2" ]; then
+        echo "FAIL: guest nproc=$n after resize, expected 2"; exit 1
+      fi
+
+      uid=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+      old=$(cat /tmp/e2e-resize-pod-uid 2>/dev/null || true)
+      if [ -z "$old" ] || [ "$uid" != "$old" ]; then
+        echo "FAIL: pod UID changed ($old -> $uid) — resize recreated the pod"; exit 1
+      fi
+
+      reason=$(kubectl get sandbox e2e-resize -n "$NAMESPACE" \
+        -o jsonpath='{.status.conditions[?(@.type=="RestartRequired")].reason}')
+      st=$(kubectl get sandbox e2e-resize -n "$NAMESPACE" \
+        -o jsonpath='{.status.conditions[?(@.type=="RestartRequired")].status}')
+      if [ "$st" != "False" ] || [ "$reason" != "Resized" ]; then
+        echo "FAIL: RestartRequired status=$st reason=$reason, expected False/Resized"; exit 1
+      fi
+
+      rm -f /tmp/e2e-resize-pod-uid
+      echo "PASS: guest nproc=2 live, same pod UID=$uid, RestartRequired=False (Resized)"

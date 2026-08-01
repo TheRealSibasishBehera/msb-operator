@@ -19,6 +19,12 @@ pub fn socket_path(msb_home: &Path, sandbox_name: &str) -> PathBuf {
         .join(format!("{hash}.sock"))
 }
 
+/// The control socket path for a given agent socket path: `<sandbox>.sock`
+/// becomes `<sandbox>.control.sock`, msb's own derivation.
+pub fn control_socket_path(agent_sock: &Path) -> PathBuf {
+    agent_sock.with_extension("control.sock")
+}
+
 /// Dials the socket, retrying until it appears (msb creates it shortly after
 /// boot).
 pub async fn dial(path: &Path, retry_for: Duration) -> Result<UnixStream> {
@@ -54,5 +60,14 @@ mod tests {
             .unwrap();
         assert_eq!(hash.len(), 32);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn control_socket_path_replaces_the_extension() {
+        let agent = Path::new("/msb/run/agent/abc.sock");
+        assert_eq!(
+            control_socket_path(agent),
+            Path::new("/msb/run/agent/abc.control.sock")
+        );
     }
 }

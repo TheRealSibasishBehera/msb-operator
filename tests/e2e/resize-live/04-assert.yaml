@@ -1,0 +1,10 @@
+# The controller applies the resize live and records the new effective values.
+# kuttl polls status until appliedCpus/appliedMemory converge to the new spec.
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-resize
+status:
+  phase: Running
+  appliedCpus: 2
+  appliedMemory: 1024

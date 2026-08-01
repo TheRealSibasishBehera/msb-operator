@@ -97,7 +97,7 @@ fn generate_crd() -> Result<()> {
     // Seal every spec field except the mutable allowlist. kube-derive can't emit CEL
     // transition rules, so inject a `self == oldSelf` rule per field. `oldSelf` binds
     // only on update, so these seal after creation and are skipped on create.
-    const MUTABLE_FIELDS: &[&str] = &["desiredState"];
+    const MUTABLE_FIELDS: &[&str] = &["desiredState", "cpus", "memory"];
 
     for version in &mut crd.spec.versions {
         if version.name != "v1alpha1" {
@@ -116,6 +116,23 @@ fn generate_crd() -> Result<()> {
         else {
             continue;
         };
+        spec.x_kubernetes_validations
+            .get_or_insert_with(Vec::new)
+            .extend([
+                ValidationRule {
+                    rule: "self.cpus <= (has(self.maxCpus) ? self.maxCpus : self.cpus)"
+                        .to_string(),
+                    message: Some("spec.cpus must not exceed spec.maxCpus".to_string()),
+                    ..Default::default()
+                },
+                ValidationRule {
+                    rule: "self.memory <= (has(self.maxMemory) ? self.maxMemory : self.memory)"
+                        .to_string(),
+                    message: Some("spec.memory must not exceed spec.maxMemory".to_string()),
+                    ..Default::default()
+                },
+            ]);
+
         let Some(fields) = spec.properties.as_mut() else {
             continue;
         };

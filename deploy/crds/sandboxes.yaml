@@ -52,13 +52,13 @@ spec:
                   rule: self == oldSelf
               cpus:
                 default: 1
-                description: Number of vCPUs. This field is immutable.
+                description: |-
+                  Number of vCPUs. Mutable, up to maxCpus: raising it live-resizes a running
+                  sandbox over the control socket when there is boot headroom, otherwise the
+                  sandbox needs a restart to apply it.
                 format: uint32
                 minimum: 0.0
                 type: integer
-                x-kubernetes-validations:
-                - message: spec.cpus is immutable after creation
-                  rule: self == oldSelf
               desiredState:
                 default: Running
                 description: |-
@@ -135,6 +135,18 @@ spec:
                 x-kubernetes-validations:
                 - message: spec.logging is immutable after creation
                   rule: self == oldSelf
+              maxCpus:
+                description: |-
+                  Boot-time vCPU ceiling. Unset defaults to `cpus` (no live-resize headroom).
+                  This field is immutable: the VMM reserves vCPU slots for this count at
+                  boot, so raising it after boot requires a new pod.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+                x-kubernetes-validations:
+                - message: spec.maxCpus is immutable after creation
+                  rule: self == oldSelf
               maxDurationSecs:
                 description: Hard cap on total sandbox lifetime, in seconds. This field is immutable.
                 format: uint64
@@ -144,15 +156,28 @@ spec:
                 x-kubernetes-validations:
                 - message: spec.maxDurationSecs is immutable after creation
                   rule: self == oldSelf
+              maxMemory:
+                description: |-
+                  Boot-time memory ceiling in MiB. Unset defaults to `memory` (no
+                  live-resize headroom). This field is immutable: the VMM reserves the
+                  virtio-mem hotplug region for this size at boot, so raising it after boot
+                  requires a new pod.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+                x-kubernetes-validations:
+                - message: spec.maxMemory is immutable after creation
+                  rule: self == oldSelf
               memory:
                 default: 512
-                description: Memory in MiB. This field is immutable.
+                description: |-
+                  Memory in MiB. Mutable, up to maxMemory: raising it live-resizes a running
+                  sandbox over the control socket when there is boot headroom, otherwise the
+                  sandbox needs a restart to apply it.
                 format: uint32
                 minimum: 0.0
                 type: integer
-                x-kubernetes-validations:
-                - message: spec.memory is immutable after creation
-                  rule: self == oldSelf
               network:
                 default:
                   dns:
@@ -406,9 +431,28 @@ spec:
             required:
             - image
             type: object
+            x-kubernetes-validations:
+            - message: spec.cpus must not exceed spec.maxCpus
+              rule: 'self.cpus <= (has(self.maxCpus) ? self.maxCpus : self.cpus)'
+            - message: spec.memory must not exceed spec.maxMemory
+              rule: 'self.memory <= (has(self.maxMemory) ? self.maxMemory : self.memory)'
           status:
             nullable: true
             properties:
+              appliedCpus:
+                description: |-
+                  The `cpus`/`memory` values last confirmed applied to the running guest —
+                  either at boot or via a live resize. Diverges from `spec.cpus`/`spec.memory`
+                  when an edit is pending a live resize or is `RestartRequired`.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              appliedMemory:
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
               conditions:
                 items:
                   description: |-

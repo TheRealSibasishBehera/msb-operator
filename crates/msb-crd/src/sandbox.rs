@@ -32,13 +32,30 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub desired_state: DesiredState,
 
-    /// Number of vCPUs. This field is immutable.
+    /// Number of vCPUs. Mutable, up to maxCpus: raising it live-resizes a running
+    /// sandbox over the control socket when there is boot headroom, otherwise the
+    /// sandbox needs a restart to apply it.
     #[serde(default = "default_cpus")]
     pub cpus: u32,
 
-    /// Memory in MiB. This field is immutable.
+    /// Memory in MiB. Mutable, up to maxMemory: raising it live-resizes a running
+    /// sandbox over the control socket when there is boot headroom, otherwise the
+    /// sandbox needs a restart to apply it.
     #[serde(default = "default_memory_mib")]
     pub memory: u32,
+
+    /// Boot-time vCPU ceiling. Unset defaults to `cpus` (no live-resize headroom).
+    /// This field is immutable: the VMM reserves vCPU slots for this count at
+    /// boot, so raising it after boot requires a new pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cpus: Option<u32>,
+
+    /// Boot-time memory ceiling in MiB. Unset defaults to `memory` (no
+    /// live-resize headroom). This field is immutable: the VMM reserves the
+    /// virtio-mem hotplug region for this size at boot, so raising it after boot
+    /// requires a new pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory: Option<u32>,
 
     /// Command to run inside the guest. Defaults to the image entrypoint. This field is immutable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -115,6 +132,18 @@ fn default_cpus() -> u32 {
 
 fn default_memory_mib() -> u32 {
     512
+}
+
+impl SandboxSpec {
+    /// The boot-time vCPU ceiling: `maxCpus` if set, else `cpus`.
+    pub fn effective_max_cpus(&self) -> u32 {
+        self.max_cpus.unwrap_or(self.cpus).max(self.cpus)
+    }
+
+    /// The boot-time memory ceiling in MiB: `maxMemory` if set, else `memory`.
+    pub fn effective_max_memory(&self) -> u32 {
+        self.max_memory.unwrap_or(self.memory).max(self.memory)
+    }
 }
 
 /// A plain (non-secret) environment variable set in the guest.
@@ -453,6 +482,14 @@ pub struct SandboxStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exposed_ports: Vec<ExposedPort>,
 
+    /// The `cpus`/`memory` values last confirmed applied to the running guest —
+    /// either at boot or via a live resize. Diverges from `spec.cpus`/`spec.memory`
+    /// when an edit is pending a live resize or is `RestartRequired`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_cpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_memory: Option<u32>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<SandboxCondition>,
 }
@@ -561,6 +598,8 @@ mod tests {
             image: "python:3.12".to_string(),
             cpus: default_cpus(),
             memory: default_memory_mib(),
+            max_cpus: None,
+            max_memory: None,
             cmd: vec![],
             entrypoint: vec![],
             env: vec![],
@@ -585,5 +624,53 @@ mod tests {
         assert_eq!(spec.network.max_connections, 256);
         assert!(spec.network.enabled);
         assert_eq!(spec.upper.size, "4Gi");
+    }
+
+    #[test]
+    fn effective_max_defaults_to_the_effective_value() {
+        let mut spec = default_spec();
+        spec.cpus = 2;
+        spec.memory = 1024;
+        assert_eq!(spec.effective_max_cpus(), 2);
+        assert_eq!(spec.effective_max_memory(), 1024);
+    }
+
+    #[test]
+    fn effective_max_uses_the_set_ceiling() {
+        let mut spec = default_spec();
+        spec.cpus = 1;
+        spec.max_cpus = Some(4);
+        spec.memory = 512;
+        spec.max_memory = Some(2048);
+        assert_eq!(spec.effective_max_cpus(), 4);
+        assert_eq!(spec.effective_max_memory(), 2048);
+    }
+
+    fn default_spec() -> SandboxSpec {
+        SandboxSpec {
+            image: "python:3.12".to_string(),
+            cpus: default_cpus(),
+            memory: default_memory_mib(),
+            max_cpus: None,
+            max_memory: None,
+            cmd: vec![],
+            entrypoint: vec![],
+            env: vec![],
+            workdir: None,
+            shell: None,
+            user: None,
+            hostname: None,
+            ephemeral: false,
+            max_duration_secs: None,
+            idle_timeout_secs: None,
+            run_policy: RunPolicy::Once,
+            secrets: vec![],
+            network: NetworkSpec::default(),
+            upper: UpperSpec::default(),
+            security_profile: SecurityProfile::default(),
+            rlimits: vec![],
+            logging: Default::default(),
+            desired_state: Default::default(),
+        }
     }
 }
