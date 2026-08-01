@@ -47,17 +47,36 @@ spec:
                 items:
                   type: string
                 type: array
+                x-kubernetes-validations:
+                - message: spec.cmd is immutable after creation
+                  rule: self == oldSelf
               cpus:
                 default: 1
                 description: Number of vCPUs.
                 format: uint32
                 minimum: 0.0
                 type: integer
+                x-kubernetes-validations:
+                - message: spec.cpus is immutable after creation
+                  rule: self == oldSelf
+              desiredState:
+                default: Running
+                description: |-
+                  Desired lifecycle state. `Stopped` removes the pod but keeps the Sandbox,
+                  restartable by setting `Running`. On the current storage model a restart is
+                  a fresh boot (guest state is not preserved). Mutable.
+                enum:
+                - Running
+                - Stopped
+                type: string
               entrypoint:
                 description: Override the image entrypoint. Empty keeps the image's own entrypoint.
                 items:
                   type: string
                 type: array
+                x-kubernetes-validations:
+                - message: spec.entrypoint is immutable after creation
+                  rule: self == oldSelf
               env:
                 description: Plain (non-secret) environment variables set in the guest.
                 items:
@@ -72,23 +91,38 @@ spec:
                   - value
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: spec.env is immutable after creation
+                  rule: self == oldSelf
               ephemeral:
                 default: false
                 description: Whether to delete the Sandbox CRD after the sandbox exits.
                 type: boolean
+                x-kubernetes-validations:
+                - message: spec.ephemeral is immutable after creation
+                  rule: self == oldSelf
               hostname:
                 description: Guest hostname.
                 nullable: true
                 type: string
+                x-kubernetes-validations:
+                - message: spec.hostname is immutable after creation
+                  rule: self == oldSelf
               idleTimeoutSecs:
                 description: Stop the sandbox after this many seconds with no activity.
                 format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer
+                x-kubernetes-validations:
+                - message: spec.idleTimeoutSecs is immutable after creation
+                  rule: self == oldSelf
               image:
                 description: OCI image for the guest root filesystem.
                 type: string
+                x-kubernetes-validations:
+                - message: spec.image is immutable after creation
+                  rule: self == oldSelf
               logging:
                 default:
                   guestConsole: false
@@ -98,18 +132,27 @@ spec:
                     default: false
                     type: boolean
                 type: object
+                x-kubernetes-validations:
+                - message: spec.logging is immutable after creation
+                  rule: self == oldSelf
               maxDurationSecs:
                 description: Hard cap on total sandbox lifetime, in seconds.
                 format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer
+                x-kubernetes-validations:
+                - message: spec.maxDurationSecs is immutable after creation
+                  rule: self == oldSelf
               memory:
                 default: 512
                 description: Memory in MiB.
                 format: uint32
                 minimum: 0.0
                 type: integer
+                x-kubernetes-validations:
+                - message: spec.memory is immutable after creation
+                  rule: self == oldSelf
               network:
                 default:
                   dns:
@@ -223,6 +266,9 @@ spec:
                     description: Copy host trusted CAs into the guest.
                     type: boolean
                 type: object
+                x-kubernetes-validations:
+                - message: spec.network is immutable after creation
+                  rule: self == oldSelf
               rlimits:
                 description: POSIX resource limits applied to guest processes at agentd startup.
                 items:
@@ -264,6 +310,9 @@ spec:
                   - soft
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: spec.rlimits is immutable after creation
+                  rule: self == oldSelf
               runPolicy:
                 default: Once
                 description: Restart policy on failure.
@@ -271,6 +320,9 @@ spec:
                 - Once
                 - RerunOnFailure
                 type: string
+                x-kubernetes-validations:
+                - message: spec.runPolicy is immutable after creation
+                  rule: self == oldSelf
               secrets:
                 description: Secrets injected as env vars inside the guest via the smoltcp proxy.
                 items:
@@ -304,6 +356,9 @@ spec:
                   - valueFrom
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: spec.secrets is immutable after creation
+                  rule: self == oldSelf
               securityProfile:
                 default: Default
                 description: In-guest hardening applied to exec sessions.
@@ -311,10 +366,16 @@ spec:
                 - Default
                 - Restricted
                 type: string
+                x-kubernetes-validations:
+                - message: spec.securityProfile is immutable after creation
+                  rule: self == oldSelf
               shell:
                 description: Default shell for guest sessions.
                 nullable: true
                 type: string
+                x-kubernetes-validations:
+                - message: spec.shell is immutable after creation
+                  rule: self == oldSelf
               upper:
                 default:
                   size: 4Gi
@@ -325,14 +386,23 @@ spec:
                     description: Writable overlay size as a Kubernetes resource.Quantity string (e.g. "4Gi").
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: spec.upper is immutable after creation
+                  rule: self == oldSelf
               user:
                 description: User the guest workload runs as (name, uid, or `uid:gid`).
                 nullable: true
                 type: string
+                x-kubernetes-validations:
+                - message: spec.user is immutable after creation
+                  rule: self == oldSelf
               workdir:
                 description: Working directory for guest commands.
                 nullable: true
                 type: string
+                x-kubernetes-validations:
+                - message: spec.workdir is immutable after creation
+                  rule: self == oldSelf
             required:
             - image
             type: object
@@ -406,7 +476,7 @@ spec:
                 - Running
                 - Succeeded
                 - Failed
-                - null
+                - Stopped
                 nullable: true
                 type: string
               podName:
@@ -450,9 +520,6 @@ spec:
         - spec
         title: Sandbox
         type: object
-        x-kubernetes-validations:
-        - message: Sandbox spec is immutable after creation
-          rule: self.spec == oldSelf.spec
     served: true
     storage: true
     subresources:

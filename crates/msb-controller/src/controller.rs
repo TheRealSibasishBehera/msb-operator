@@ -149,7 +149,12 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
 
+    let stopped = desired_stopped(&sandbox);
+
     let Some(existing) = existing else {
+        if stopped {
+            return mark_stopped(&sandbox, &ctx, &sandboxes, &name).await;
+        }
         // Terminal sandboxes must not resurrect their pod: the controller deletes
         // the pod after recording status, and Once means no retry.
         if is_terminal(&sandbox) {
@@ -158,12 +163,21 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         // A pod that was Running and is now gone vanished uncleanly — node loss,
         // eviction, or an external delete. It never reached a terminal phase we
         // could read a reason from, so treat the disappearance itself as the
-        // unclean exit and route it through the same runPolicy decision.
+        // unclean exit and route it through the same runPolicy decision. A desired
+        // Stop lands in phase Stopped, not Running, so it does not trip this.
         if was_running(&sandbox) {
             return handle_vanished_pod(&sandbox, &ctx, &sandboxes, &name).await;
         }
         return create_pod(&sandbox, &ctx, &pods, &name).await;
     };
+
+    if stopped {
+        // Guard the delete so a reconcile during termination doesn't re-issue it.
+        if existing.metadata.deletion_timestamp.is_none() {
+            delete_pod(&pods, &existing.name_any(), &name).await?;
+        }
+        return mark_stopped(&sandbox, &ctx, &sandboxes, &name).await;
+    }
 
     // A pod we already asked to delete (e.g. a retry in flight) still reports its
     // terminal phase until it's gone. Acting on it again would double-count the
@@ -530,6 +544,61 @@ fn was_running(sandbox: &Sandbox) -> bool {
     sandbox.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&SandboxPhase::Running)
 }
 
+fn desired_stopped(sandbox: &Sandbox) -> bool {
+    sandbox.spec.desired_state == msb_crd::sandbox::DesiredState::Stopped
+}
+
+async fn delete_pod(pods: &Api<Pod>, pod_name: &str, name: &str) -> Result<(), Error> {
+    if let Err(source) = pods.delete(pod_name, &DeleteParams::default()).await
+        && !is_not_found(&source)
+    {
+        return Err(Error::DeletePod {
+            sandbox: name.to_string(),
+            pod: pod_name.to_string(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+/// Record the resting `Stopped` phase for a desired-Stop. Not a terminal state and
+/// not a failure: runPolicy does not fire and `restart_count` is preserved, not
+/// bumped. The per-sandbox Service is left in place so identity is stable across a
+/// stop/start.
+async fn mark_stopped(
+    sandbox: &Sandbox,
+    ctx: &Context,
+    sandboxes: &Api<Sandbox>,
+    name: &str,
+) -> Result<Action, Error> {
+    if sandbox.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&SandboxPhase::Stopped) {
+        return Ok(Action::await_change());
+    }
+
+    let now = now_rfc3339();
+    let mut conditions = prior_conditions(sandbox);
+    conditions::set(
+        &mut conditions,
+        conditions::ready(false, "Stopped", "sandbox is stopped by desiredState", now),
+    );
+    let status = SandboxStatus {
+        phase: Some(SandboxPhase::Stopped),
+        restart_count: sandbox.status.as_ref().map(|s| s.restart_count).unwrap_or(0),
+        conditions,
+        ..Default::default()
+    };
+    patch_status(sandboxes, name, &status).await?;
+    ctx.recorder
+        .publish(
+            &event(EventType::Normal, "Stopped", "sandbox stopped by desiredState"),
+            &sandbox.object_ref(&()),
+        )
+        .await
+        .ok();
+    info!(sandbox = %name, "stopped");
+    Ok(Action::await_change())
+}
+
 async fn finish(sandbox: &Sandbox, sandboxes: &Api<Sandbox>, name: &str) -> Result<Action, Error> {
     if !sandbox.spec.ephemeral {
         return Ok(Action::await_change());
@@ -778,6 +847,7 @@ mod tests {
         for (phase, expected) in [
             (SandboxPhase::Pending, false),
             (SandboxPhase::Running, false),
+            (SandboxPhase::Stopped, false),
             (SandboxPhase::Succeeded, true),
             (SandboxPhase::Failed, true),
         ] {
@@ -787,6 +857,25 @@ mod tests {
             });
             assert_eq!(is_terminal(&sb), expected, "{phase:?}");
         }
+    }
+
+    #[test]
+    fn desired_stopped_reads_the_spec_field() {
+        let mut sb = sandbox();
+        assert!(!desired_stopped(&sb), "default is Running");
+        sb.spec.desired_state = msb_crd::sandbox::DesiredState::Stopped;
+        assert!(desired_stopped(&sb));
+    }
+
+    #[test]
+    fn stopped_phase_is_not_a_vanished_pod() {
+        // A pod removed by a desired Stop must not be seen as an unclean vanish.
+        let mut sb = sandbox();
+        sb.status = Some(msb_crd::SandboxStatus {
+            phase: Some(SandboxPhase::Stopped),
+            ..Default::default()
+        });
+        assert!(!was_running(&sb));
     }
 
     #[test]

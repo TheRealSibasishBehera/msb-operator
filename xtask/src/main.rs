@@ -94,24 +94,43 @@ fn generate_rbac() -> Result<()> {
 fn generate_crd() -> Result<()> {
     let mut crd = Sandbox::crd();
 
-    // kube-derive does not support CEL transition rules via the derive macro.
-    let cel_rule = ValidationRule {
-        rule: "self.spec == oldSelf.spec".to_string(),
-        message: Some("Sandbox spec is immutable after creation".to_string()),
-        ..Default::default()
-    };
+    // Seal every spec field except the mutable allowlist. kube-derive can't emit CEL
+    // transition rules, so inject a `self == oldSelf` rule per field. `oldSelf` binds
+    // only on update, so these seal after creation and are skipped on create.
+    const MUTABLE_FIELDS: &[&str] = &["desiredState"];
 
     for version in &mut crd.spec.versions {
         if version.name != "v1alpha1" {
             continue;
         }
-        if let Some(schema) = version.schema.as_mut() {
-            if let Some(props) = schema.open_api_v3_schema.as_mut() {
-                props
-                    .x_kubernetes_validations
-                    .get_or_insert_with(Vec::new)
-                    .push(cel_rule.clone());
+        let Some(schema) = version.schema.as_mut() else {
+            continue;
+        };
+        let Some(root) = schema.open_api_v3_schema.as_mut() else {
+            continue;
+        };
+        let Some(spec) = root
+            .properties
+            .as_mut()
+            .and_then(|p| p.get_mut("spec"))
+        else {
+            continue;
+        };
+        let Some(fields) = spec.properties.as_mut() else {
+            continue;
+        };
+        for (name, field) in fields.iter_mut() {
+            if MUTABLE_FIELDS.contains(&name.as_str()) {
+                continue;
             }
+            field
+                .x_kubernetes_validations
+                .get_or_insert_with(Vec::new)
+                .push(ValidationRule {
+                    rule: "self == oldSelf".to_string(),
+                    message: Some(format!("spec.{name} is immutable after creation")),
+                    ..Default::default()
+                });
         }
     }
 

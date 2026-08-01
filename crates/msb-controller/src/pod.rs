@@ -512,6 +512,7 @@ pub(crate) mod test_support {
                 security_profile: Default::default(),
                 rlimits: Vec::new(),
                 logging: Default::default(),
+                desired_state: Default::default(),
             },
             status: None,
         }
