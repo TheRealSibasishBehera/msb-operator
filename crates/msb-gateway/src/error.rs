@@ -32,10 +32,6 @@ pub enum GatewayError {
     #[error("sandbox already exists: {0}")]
     AlreadyExists(String),
 
-    /// A route intentionally unimplemented in V1 (e.g. logs streaming).
-    #[error("not implemented: {0}")]
-    NotImplemented(String),
-
     /// Talking to the API server failed.
     #[error(transparent)]
     Kube(#[from] kube::Error),
@@ -55,7 +51,6 @@ impl GatewayError {
             GatewayError::Forbidden(_) => "forbidden",
             GatewayError::InvalidRequest(_) => "invalid_request",
             GatewayError::AlreadyExists(_) => "name_already_exists",
-            GatewayError::NotImplemented(_) => "invalid_request",
             GatewayError::Kube(_) | GatewayError::Bridge(_) => "internal",
         }
     }
@@ -69,7 +64,6 @@ impl GatewayError {
             GatewayError::Forbidden(_) => StatusCode::FORBIDDEN,
             GatewayError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             GatewayError::AlreadyExists(_) => StatusCode::CONFLICT,
-            GatewayError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             GatewayError::Kube(_) | GatewayError::Bridge(_) => StatusCode::BAD_GATEWAY,
         }
     }

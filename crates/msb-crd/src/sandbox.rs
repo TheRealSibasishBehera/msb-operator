@@ -97,6 +97,10 @@ pub struct SandboxSpec {
     /// POSIX resource limits applied to guest processes at agentd startup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rlimits: Vec<Rlimit>,
+
+    /// Guest console log capture, opt-in.
+    #[serde(default)]
+    pub logging: LoggingSpec,
 }
 
 fn default_cpus() -> u32 {
@@ -389,6 +393,18 @@ pub enum RlimitResource {
     Rttime,
 }
 
+// --- Logging ---
+
+/// Guest console log capture, opt-in. When `guest_console` is true the pod
+/// carries an extra `msb-console-log` container that tails the guest's
+/// stdout/stderr, separate from runtime infra logs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LoggingSpec {
+    #[serde(default)]
+    pub guest_console: bool,
+}
+
 // --- Run policy ---
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -543,6 +559,7 @@ mod tests {
             upper: UpperSpec::default(),
             security_profile: SecurityProfile::default(),
             rlimits: vec![],
+            logging: Default::default(),
         };
         assert_eq!(spec.cpus, 1);
         assert_eq!(spec.memory, 512);

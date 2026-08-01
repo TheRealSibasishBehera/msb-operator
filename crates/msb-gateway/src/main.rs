@@ -18,6 +18,7 @@ mod error;
 mod exec;
 mod lifecycle;
 mod limits;
+mod logs;
 mod resolve;
 
 use std::time::Duration;

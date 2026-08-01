@@ -121,6 +121,11 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         ("microsandbox.dev/sandbox-name".to_string(), name.clone()),
     ]);
 
+    let mut containers = vec![runtime_container(cfg, &spec_json, &flat_name, &sandbox.spec)];
+    if sandbox.spec.logging.guest_console {
+        containers.push(console_log_container(cfg, &flat_name));
+    }
+
     Ok(Pod {
         metadata: ObjectMeta {
             name: Some(pod_name(&name)),
@@ -133,12 +138,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
             // The bridge is a native sidecar, so it lives in init_containers but
             // stays up for the pod's life and is ready in parallel with the boot.
             init_containers: Some(vec![bridge_container(cfg, &flat_name)]),
-            containers: vec![runtime_container(
-                cfg,
-                &spec_json,
-                &flat_name,
-                &sandbox.spec,
-            )],
+            containers,
             volumes: Some(volumes(&sandbox.spec)),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
@@ -353,6 +353,62 @@ fn bridge_container(cfg: &ControllerConfig, flat_name: &str) -> Container {
     }
 }
 
+/// The guest-console log sidecar. A plain container, not a native sidecar: it has
+/// no readiness contract, so it needs no probe and does not gate the runtime's
+/// start. Reuses the runtime image.
+fn console_log_container(cfg: &ControllerConfig, flat_name: &str) -> Container {
+    Container {
+        name: "msb-console-log".to_string(),
+        image: Some(cfg.runtime_image.clone()),
+        args: Some(vec!["console-log".to_string()]),
+        env: Some(vec![
+            EnvVar {
+                name: "MSB_SANDBOX_NAME".to_string(),
+                value: Some(flat_name.to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "MSB_HOME".to_string(),
+                value: Some(cfg.msb_home().to_string()),
+                ..Default::default()
+            },
+            EnvVar {
+                name: "RUST_LOG".to_string(),
+                value: Some(cfg.runtime_log.clone()),
+                ..Default::default()
+            },
+        ]),
+        volume_mounts: Some(vec![VolumeMount {
+            name: VOL_HOME.to_string(),
+            mount_path: cfg.msb_home().to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        }]),
+        resources: Some(console_log_resources()),
+        security_context: Some(SecurityContext {
+            allow_privilege_escalation: Some(false),
+            capabilities: Some(Capabilities {
+                drop: Some(vec!["ALL".to_string()]),
+                add: None,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Minimal resources: this container only tails and reformats a file, no VMM.
+fn console_log_resources() -> ResourceRequirements {
+    let requests = BTreeMap::from([
+        ("cpu".to_string(), Quantity("10m".to_string())),
+        ("memory".to_string(), Quantity("32Mi".to_string())),
+    ]);
+    ResourceRequirements {
+        requests: Some(requests),
+        ..Default::default()
+    }
+}
+
 /// The distinct Secret names referenced by `spec.secrets`, in stable order.
 fn referenced_secret_names(spec: &SandboxSpec) -> Vec<String> {
     let mut names: Vec<String> = spec
@@ -455,6 +511,7 @@ pub(crate) mod test_support {
                 upper: Default::default(),
                 security_profile: Default::default(),
                 rlimits: Vec::new(),
+                logging: Default::default(),
             },
             status: None,
         }
@@ -1012,5 +1069,63 @@ mod tests {
     fn duplicate_published_ports_are_rejected() {
         let err = build(&test_support::sandbox_with_ports(&[8000, 8000]), &config()).unwrap_err();
         assert!(matches!(err, PodBuildError::InvalidPorts { .. }));
+    }
+
+    #[test]
+    fn no_console_log_container_when_logging_is_off() {
+        let pod = build(&sandbox(), &config()).unwrap();
+        let names: Vec<_> = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["msb-runtime"]);
+    }
+
+    #[test]
+    fn console_log_container_added_when_guest_console_enabled() {
+        let mut sb = sandbox();
+        sb.spec.logging.guest_console = true;
+        let pod = build(&sb, &config()).unwrap();
+        let spec = pod.spec.as_ref().unwrap();
+        let names: Vec<_> = spec.containers.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["msb-runtime", "msb-console-log"]);
+
+        let c = container(&pod, "msb-console-log");
+        assert_eq!(c.image.as_deref(), Some("ghcr.io/msb/runtime:dev"));
+        assert_eq!(c.args, Some(vec!["console-log".to_string()]));
+        assert_eq!(env_of(c, "MSB_SANDBOX_NAME"), Some("team-a__my-sandbox".to_string()));
+        assert_eq!(env_of(c, "MSB_HOME"), Some("/msb".to_string()));
+
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let home = mounts.iter().find(|m| m.name == VOL_HOME).unwrap();
+        assert_eq!(home.mount_path, "/msb");
+        assert_eq!(home.read_only, Some(true));
+
+        assert!(
+            spec.init_containers
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|c| c.name != "msb-console-log")
+        );
+        assert!(c.readiness_probe.is_none());
+        assert!(c.liveness_probe.is_none());
+        assert!(c.ports.is_none());
+    }
+
+    #[test]
+    fn console_log_container_is_restricted() {
+        let mut sb = sandbox();
+        sb.spec.logging.guest_console = true;
+        let pod = build(&sb, &config()).unwrap();
+        let c = container(&pod, "msb-console-log");
+        let sc = c.security_context.as_ref().unwrap();
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(sc.capabilities.as_ref().unwrap().drop, Some(vec!["ALL".to_string()]));
+        assert_eq!(sc.capabilities.as_ref().unwrap().add, None);
     }
 }

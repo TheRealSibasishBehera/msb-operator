@@ -29,6 +29,10 @@ rules:
   - apiGroups: ["sandbox.microsandbox.dev"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "create", "delete"]
+  # (b) guest-console logs: stream the msb-console-log sidecar's container log.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   # (a) authenticate the caller's Bearer token.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]

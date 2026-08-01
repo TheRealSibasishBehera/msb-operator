@@ -92,6 +92,15 @@ spec:
               image:
                 description: OCI image for the guest root filesystem.
                 type: string
+              logging:
+                default:
+                  guestConsole: false
+                description: Guest console log capture, opt-in.
+                properties:
+                  guestConsole:
+                    default: false
+                    type: boolean
+                type: object
               maxDurationSecs:
                 description: Hard cap on total sandbox lifetime, in seconds.
                 format: uint64
