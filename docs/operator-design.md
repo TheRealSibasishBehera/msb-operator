@@ -362,6 +362,10 @@ spec:
   # Whether to delete the CRD after the sandbox exits
   ephemeral: true
 
+  # Lifetime limits (optional; unset = no limit)
+  maxDurationSecs: 3600      # hard cap on total sandbox lifetime
+  idleTimeoutSecs: 300       # stop after this many seconds with no activity
+
   # Secrets injected as env vars inside the guest
   # Values come from Kubernetes Secrets — never stored in the CRD
   secrets:
@@ -847,10 +851,10 @@ For SDK clients, the gateway exposes `GET /v1/sandboxes/<name>/logs`, which stre
 | `msb-daemon` | `DaemonSet` | Every node; includes device plugin |
 | `msb-gateway` | `Deployment` + `ClusterIP` `Service` | Opt-in (`gateway.enabled`, default off); SDK-compatible cloud endpoint |
 | `sandboxes.sandbox.microsandbox.dev` | `CustomResourceDefinition` | v1alpha1 |
-| `msb-controller` | `ClusterRole` + `ClusterRoleBinding` | |
-| `msb-daemon` | `ClusterRole` + `ClusterRoleBinding` | |
-| `msb-controller` | `ServiceAccount` | |
-| `msb-daemon` | `ServiceAccount` | |
+| `msb-controller` | `ClusterRole` + `ClusterRoleBinding` + `ServiceAccount` | |
+| `msb-daemon` | `ClusterRole` + `ClusterRoleBinding` + `ServiceAccount` | |
+| `msb-gateway` | `ClusterRole` + `ClusterRoleBinding` + `ServiceAccount` | Opt-in with the gateway; TokenReview/SubjectAccessReview access |
+| `sandbox-operator`, `sandbox-viewer` | `ClusterRole` (aggregated) | Tenant-facing roles to bind in their own namespaces (`rbac.aggregatedRoles`) |
 
 No ingress, no service mesh, no storage classes, no cert-manager dependency.
 
