@@ -259,6 +259,7 @@ sequenceDiagram
 | `msb-prerunner` | Init container (per pod) | Resolves `secretKeyRef` values; writes resolved `msb` config to shared `emptyDir`; copies `msb` binary and `libkrunfw.so` |
 | `msb-runtime` | Container (per pod) | Runs `msb` in detached mode (started by the daemon); hosts the guest VM and smoltcp proxy |
 | `msb-bridge` | Sidecar container (per pod) | WebSocket → `agent.sock` bridge; port configurable, default 7000; injected automatically by the controller; SDK clients connect here |
+| `msb-gateway` | `Deployment` (opt-in) | Speaks msb's cloud API so the unmodified SDK drives the cluster; lifecycle REST and exec WebSocket; off by default |
 | Device plugin | Part of `msb-daemon` | gRPC server on kubelet socket; advertises `devices.microsandbox.io/kvm` |
 
 ### Component Design
@@ -895,6 +896,7 @@ The `id` (correlation ID) and `flags` fields sit **outside** the [CBOR](https://
 |---|---|---|---|
 | `agent.sock` direct | UDS (local only) | no | yes, full SDK surface |
 | WebSocket bridge (V1) | TCP/WebSocket | yes | yes, via `AgentClient::connect_stream` |
+| Cloud gateway | HTTP + WebSocket | yes | yes, the unmodified SDK via `MSB_API_URL` |
 | `msb ssh serve` | TCP/SSH | yes | no, interactive shell only |
 
 `msb ssh serve` binds a real TCP listener (default port 2222). Exposed via a Kubernetes Service it gives interactive shell access from outside the pod without any gateway.
@@ -921,6 +923,17 @@ On each incoming WebSocket connection the bridge dials `agent.sock`, reads the 8
 
 The bridge also exposes `POST /control` on its health port: it relays one JSON request to the sandbox's control socket (`<sandbox>.control.sock`) and returns the reply. The controller uses it to apply a live cpu/memory resize, reaching the socket through the per-sandbox Service instead of exec'ing into the pod.
 
+#### Cloud gateway
+
+The bridge reaches one sandbox's exec socket. The **gateway** (`msb-gateway`) is the cluster-level entrypoint: it speaks msb's cloud API, so the unmodified msb SDK and CLI drive the cluster by pointing `MSB_API_URL` at it, with `MSB_API_KEY` set to a Kubernetes ServiceAccount token. No client changes.
+
+It is one binary with two halves:
+
+- **Lifecycle** — a REST surface (create, get, list, delete, start, stop) that maps the cloud API to the `Sandbox` CRD. `create` writes a Sandbox and waits until Running; `start`/`stop` patch `spec.desiredState`; `list` filters by label. SDK labels become `metadata.labels` (so they are selectable), or annotations when they don't fit a k8s label.
+- **Exec** — a WebSocket endpoint that forwards the client to the target sandbox's bridge, reusing the bridge's byte-for-byte splice.
+
+Each request carries a bearer token: a TokenReview validates it, then a SubjectAccessReview checks the caller may perform the verb on `sandboxes` in their namespace. The gateway is opt-in (`gateway.enabled`, default off) and exposes a ClusterIP Service only.
+
 
 ### Deployment
 
@@ -930,6 +943,7 @@ The bridge also exposes `POST /control` on its health port: it relays one JSON r
 |----------|------|-------|
 | `msb-controller` | `Deployment` | 2 replicas; leader election; cluster-wide |
 | `msb-daemon` | `DaemonSet` | Every node; includes device plugin |
+| `msb-gateway` | `Deployment` + `ClusterIP` `Service` | Opt-in (`gateway.enabled`, default off); SDK-compatible cloud endpoint |
 | `sandboxes.sandbox.microsandbox.io` | `CustomResourceDefinition` | v1alpha1 |
 | `msb-controller` | `ClusterRole` + `ClusterRoleBinding` | |
 | `msb-daemon` | `ClusterRole` + `ClusterRoleBinding` | |
