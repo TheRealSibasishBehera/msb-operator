@@ -483,6 +483,7 @@ spec:
 status:
   phase: Running             # Pending | Running | Stopped | Succeeded | Failed — written by controller
   podName: sandbox-my-sandbox-a1b2c  # written by controller at pod creation
+  serviceName: msb-<hash>    # the per-sandbox ClusterIP Service; clients read it to reach the bridge
   nodeName: node-1           # where the pod was scheduled (a Node print column)
   startedAt: "2026-06-29T10:00:00Z"  # written by controller when phase transitions to Running
   terminatedAt: null         # written by controller when phase transitions to Succeeded/Failed
@@ -493,6 +494,11 @@ status:
   #   unclean: OOMKilled | Evicted | NodeLost
   terminationReason: null    # written by controller from pod annotation (daemon sets the annotation)
   exitCode: null             # written by controller from pod annotation
+  restartCount: 0            # pod recreations under runPolicy: RerunOnFailure; drives the requeue backoff
+  exposedPorts:              # ports reflected onto the Service, so kubectl describe shows guest listeners
+    - name: port-8080
+      port: 8080
+      protocol: TCP
   appliedCpus: 1             # cpus/memory last applied to the guest; lag spec while a resize is pending
   appliedMemory: 512
   conditions:                # RestartRequired when a resize can't be applied live
