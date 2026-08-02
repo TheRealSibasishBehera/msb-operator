@@ -44,6 +44,8 @@
     - [Protocol wire format](#protocol-wire-format)
     - [Access options from outside the pod](#access-options-from-outside-the-pod)
     - [V1: WebSocket bridge sidecar](#v1-websocket-bridge-sidecar)
+    - [Cloud gateway](#cloud-gateway)
+    - [Guest console logs](#guest-console-logs)
   - [Deployment](#deployment)
     - [Helm chart contents](#helm-chart-contents)
     - [Node requirements](#node-requirements)
@@ -248,6 +250,7 @@ sequenceDiagram
 | `msb-daemon` | `DaemonSet` | Per-node; watches sandbox pods; tracks PID via SQLite; re-adopts live sandboxes on restart; annotates pods with termination reason |
 | `msb-runtime` | Container (per pod) | Runs `msb` in detached mode (started by the daemon); hosts the guest VM and smoltcp proxy |
 | `msb-bridge` | Sidecar container (per pod) | WebSocket → `agent.sock` bridge; port configurable, default 7000; injected automatically by the controller; SDK clients connect here |
+| `msb-console-log` | Container (per pod, opt-in) | Added when `logging.guestConsole` is set; tails guest stdout/stderr to its own stdout for `kubectl logs` |
 | `msb-gateway` | `Deployment` (opt-in) | Speaks msb's cloud API so the unmodified SDK drives the cluster; lifecycle REST and exec WebSocket; off by default |
 | Device plugin | Part of `msb-daemon` | gRPC server on kubelet socket; advertises `devices.microsandbox.io/kvm` |
 
@@ -472,6 +475,10 @@ spec:
     - resource: Nofile          # one of the 16 RLIMIT_* resources
       soft: 1024
       hard: 4096
+
+  # Guest console logs (opt-in; adds a sidecar that streams guest stdout/stderr)
+  logging:
+    guestConsole: true
 
 status:
   phase: Running             # Pending | Running | Stopped | Succeeded | Failed — written by controller
@@ -882,6 +889,12 @@ It is one binary with two halves:
 - **Exec** — a WebSocket endpoint that forwards the client to the target sandbox's bridge, reusing the bridge's byte-for-byte splice.
 
 Each request carries a bearer token: a TokenReview validates it, then a SubjectAccessReview checks the caller may perform the verb on `sandboxes` in their namespace. The gateway is opt-in (`gateway.enabled`, default off) and exposes a ClusterIP Service only.
+
+#### Guest console logs
+
+`spec.logging.guestConsole` (opt-in, default off) adds an `msb-console-log` container to the pod. It reuses the runtime image, tails the guest's captured stdout/stderr, and prints one JSON line per entry to its own stdout — so `kubectl logs -c msb-console-log` shows the guest console. It is a plain container, not a native sidecar: it has no readiness contract and does not gate the runtime's start, so enabling it costs nothing at boot.
+
+For SDK clients, the gateway exposes `GET /v1/sandboxes/<name>/logs`, which streams that container's log in msb's cloud SSE format (`event: log` / `event: end`). This is live-follow only.
 
 
 ### Deployment
