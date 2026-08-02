@@ -158,7 +158,7 @@ sequenceDiagram
     User->>API: kubectl apply Sandbox CRD
     API-->>Ctrl: watch event (new Sandbox)
     Ctrl->>Ctrl: validate spec
-    Ctrl->>API: create sandbox Pod (requests devices.microsandbox.io/kvm: 1, mounts referenced Secrets read-only)
+    Ctrl->>API: create sandbox Pod (requests devices.microsandbox.dev/kvm: 1, mounts referenced Secrets read-only)
     Ctrl->>API: patch Sandbox.status.phase = Pending
     API->>API: schedule Pod to KVM-capable node
 
@@ -207,7 +207,7 @@ The daemon holds no per-sandbox state. `msb` runs inside the `msb-runtime` conta
 | `msb-bridge` | Sidecar container (per pod) | WebSocket → `agent.sock` bridge; port configurable, default 7000; injected automatically by the controller; SDK clients connect here |
 | `msb-console-log` | Container (per pod, opt-in) | Added when `logging.guestConsole` is set; tails guest stdout/stderr to its own stdout for `kubectl logs` |
 | `msb-gateway` | `Deployment` (opt-in) | Speaks msb's cloud API so the unmodified SDK drives the cluster; lifecycle REST and exec WebSocket; off by default |
-| Device plugin | Part of `msb-daemon` | gRPC server on kubelet socket; advertises `devices.microsandbox.io/kvm` |
+| Device plugin | Part of `msb-daemon` | gRPC server on kubelet socket; advertises `devices.microsandbox.dev/kvm` |
 
 ### Component Design
 
@@ -217,7 +217,7 @@ Deployment with leader election enabled. Replica count is operator-configured (t
 
 **Responsibilities:**
 - Watch `Sandbox` CRDs via a `kube::runtime::Controller` reconciler
-- On create: validate spec, create the sandbox Pod with `devices.microsandbox.io/kvm: 1` resource request; set the Sandbox CRD as an `ownerReference` on the Pod (pod is garbage collected automatically when the CRD is deleted)
+- On create: validate spec, create the sandbox Pod with `devices.microsandbox.dev/kvm: 1` resource request; set the Sandbox CRD as an `ownerReference` on the Pod (pod is garbage collected automatically when the CRD is deleted)
 - On Pod Running: patch `Sandbox.status.phase = Running`
 - On runtime-container exit: derive the termination reason from the container's terminated state, patch `Sandbox.status`, then explicitly delete the pod (not via GC: the controller deletes it so stale pods don't accumulate). If `runPolicy: RerunOnFailure` and the exit was unclean, requeue to create a new pod (cold boot). On a clean exit with `ephemeral: true`, delete the CRD object (which cascades pod GC via owner reference).
 - On delete: the owner reference cascades pod deletion; the kubelet stops the containers, which terminates `msb`
@@ -302,10 +302,10 @@ sequenceDiagram
     participant Plugin as device plugin (in msb-daemon)
 
     Plugin->>Plugin: start gRPC server on microsandbox-kvm.sock
-    Plugin->>Kubelet: Register(resourceName="devices.microsandbox.io/kvm")
+    Plugin->>Kubelet: Register(resourceName="devices.microsandbox.dev/kvm")
     Kubelet->>Plugin: ListAndWatch()
     Plugin-->>Kubelet: [kvm-0…kvm-999: Healthy]
-    Note over Kubelet: capacity: devices.microsandbox.io/kvm = 1000
+    Note over Kubelet: capacity: devices.microsandbox.dev/kvm = 1000
 
     loop inotify on /dev/
         alt /dev/kvm removed
@@ -322,7 +322,7 @@ sequenceDiagram
 ### CRD Specification
 
 ```yaml
-apiVersion: sandbox.microsandbox.io/v1alpha1
+apiVersion: sandbox.microsandbox.dev/v1alpha1
 kind: Sandbox
 metadata:
   name: my-sandbox
@@ -685,7 +685,7 @@ spec:
         add: ["NET_ADMIN"]
     resources:
       limits:
-        devices.microsandbox.io/kvm: 1
+        devices.microsandbox.dev/kvm: 1
 ```
 
 **`CAP_NET_ADMIN`** is required by libkrun internally for its virtio-net setup. Microsandbox's own network stack (smoltcp) is pure userspace: no TAP devices, no iptables. `NET_ADMIN` comes entirely from libkrun, not smoltcp. `SYS_ADMIN` is not required; the device plugin grant of `/dev/kvm` is sufficient for KVM ioctls. No `--privileged` flag. This is tighter than KubeVirt's virt-launcher (`NET_ADMIN + NET_RAW + SYS_NICE`); microsandbox needs `NET_ADMIN` only.
@@ -740,7 +740,7 @@ Two ServiceAccounts, each scoped to the minimum needed. No component has Secret 
 
 Mounting the Secret exposes the pod to exactly the Secrets it references and nothing more — tighter than an API read, which RBAC can only grant across all Secrets in a namespace.
 
-`Sandbox` is namespace-scoped, so standard Kubernetes isolation applies: RBAC, `ResourceQuota`, and `NetworkPolicy` all work identically to pods. Two aggregated ClusterRoles (`sandbox-operator`, `sandbox-viewer`) are shipped with the Helm chart for tenants to bind into their own namespaces via RoleBinding. Quotas use `count/sandboxes.sandbox.microsandbox.io`; all create/delete operations appear in the audit log with caller identity.
+`Sandbox` is namespace-scoped, so standard Kubernetes isolation applies: RBAC, `ResourceQuota`, and `NetworkPolicy` all work identically to pods. Two aggregated ClusterRoles (`sandbox-operator`, `sandbox-viewer`) are shipped with the Helm chart for tenants to bind into their own namespaces via RoleBinding. Quotas use `count/sandboxes.sandbox.microsandbox.dev`; all create/delete operations appear in the audit log with caller identity.
 
 **ResourceQuota example:**
 
@@ -752,7 +752,7 @@ metadata:
   namespace: team-a
 spec:
   hard:
-    count/sandboxes.sandbox.microsandbox.io: "10"
+    count/sandboxes.sandbox.microsandbox.dev: "10"
     requests.cpu: "20"
     requests.memory: "40Gi"
 ```
@@ -845,7 +845,7 @@ For SDK clients, the gateway exposes `GET /v1/sandboxes/<name>/logs`, which stre
 | `msb-controller` | `Deployment` | 2 replicas; leader election; cluster-wide |
 | `msb-daemon` | `DaemonSet` | Every node; includes device plugin |
 | `msb-gateway` | `Deployment` + `ClusterIP` `Service` | Opt-in (`gateway.enabled`, default off); SDK-compatible cloud endpoint |
-| `sandboxes.sandbox.microsandbox.io` | `CustomResourceDefinition` | v1alpha1 |
+| `sandboxes.sandbox.microsandbox.dev` | `CustomResourceDefinition` | v1alpha1 |
 | `msb-controller` | `ClusterRole` + `ClusterRoleBinding` | |
 | `msb-daemon` | `ClusterRole` + `ClusterRoleBinding` | |
 | `msb-controller` | `ServiceAccount` | |
@@ -858,7 +858,7 @@ No ingress, no service mesh, no storage classes, no cert-manager dependency.
 - Nodes must have `/dev/kvm` accessible (character device, mode 0660)
 - KVM is available on: bare metal, Hetzner bare metal, AWS `*.metal` instances, bare-metal GKE node pools, self-hosted clusters with nested virt enabled
 - KVM is NOT available on: standard EKS/GKE/AKS VM nodes (no nested virt by default), Fargate, most managed node groups
-- The device plugin reports `devices.microsandbox.io/kvm: 0` on non-KVM nodes; the scheduler will not place sandbox pods there
+- The device plugin reports `devices.microsandbox.dev/kvm: 0` on non-KVM nodes; the scheduler will not place sandbox pods there
 
 #### Port publishing
 
