@@ -16,7 +16,6 @@
   - [Component Design](#component-design)
     - [msb-controller](#msb-controller)
     - [msb-daemon](#msb-daemon)
-    - [msb-prerunner (init container)](#msb-prerunner-init-container)
     - [Device Plugin](#device-plugin)
   - [CRD Specification](#crd-specification)
     - [runPolicy](#runpolicy)
@@ -100,9 +99,9 @@ The **controller** watches CRDs cluster-wide, creates pods, and syncs status. It
 
 The **daemon** runs on every node. `msb` must exec on the same machine as `/dev/kvm`; the process that starts it, tracks the PID, and reports its exit must be co-located. The daemon is the bridge between a node-local OS process and the Kubernetes API.
 
-The **prerunner init container** resolves secrets. Secret values cannot be stored in the CRD spec or passed as env vars; they must be injected into a typed JSON config before `msb` starts. An init container runs once per pod under a namespace-scoped ServiceAccount and hands off a fully resolved config file to the runtime container over a shared `emptyDir`.
+Secret values cannot be stored in the CRD spec or passed as env vars. The controller mounts each referenced Secret as a read-only volume; the kubelet reads it, so the pod needs no Secret RBAC, and the runtime resolves the values in-process before `msb` starts.
 
-One sandbox = one pod. The pod contains an init container (prerunner) and two containers (msb-runtime, msb-bridge). The `msb-runtime` container launches `msb` in detached mode; the daemon watches the pod, reads the PID from SQLite, and surfaces termination state back to the controller via pod annotations. The controller is the sole writer of CRD status. Secrets never appear in the pod spec, env vars, or logs; they are resolved at runtime by the prerunner and passed to `msb` over a file descriptor.
+One sandbox = one pod: two containers, `msb-runtime` and the `msb-bridge` sidecar. `msb-runtime` launches `msb` in detached mode (`msb` and `libkrunfw` are baked into its image); the daemon watches the pod, reads the PID from SQLite, and surfaces termination state back to the controller via pod annotations. The controller is the sole writer of CRD status. Secrets never appear in the pod spec, env vars, or logs.
 
 ---
 
@@ -123,9 +122,8 @@ graph TB
             kubelet["kubelet"]
 
             subgraph pod["Sandbox Pod"]
-                prerunner["init: msb-prerunner<br/>resolve secrets<br/>write config<br/>copy msb binary + libkrunfw"]
-                runtime["msb-runtime<br/>msb start (detached)<br/>libkrun · guest VM<br/>smoltcp proxy"]
-                bridge["msb-bridge<br/>WebSocket → agent.sock<br/>port configurable (default 7000)"]
+                runtime["msb-runtime<br/>resolve secrets · msb start (detached)<br/>libkrun · guest VM<br/>smoltcp proxy"]
+                bridge["msb-bridge sidecar<br/>WebSocket → agent.sock<br/>port configurable (default 7000)"]
             end
 
         end
@@ -143,7 +141,6 @@ graph TB
     api -->|"schedule to KVM node"| nodeA
     daemon -->|"patch pod annotations"| api
     kubelet <-->|"ListAndWatch / Allocate"| daemon
-    prerunner -->|"emptyDir: sandbox.json + msb bin + libkrunfw"| runtime
     runtime -->|"agent.sock (emptyDir)"| bridge
 ```
 
@@ -155,24 +152,18 @@ sequenceDiagram
     participant API as k8s API Server
     participant Ctrl as msb-controller
     participant Daemon as msb-daemon
-    participant Pre as msb-prerunner
     participant Runtime as msb-runtime
 
     User->>API: kubectl apply Sandbox CRD
     API-->>Ctrl: watch event (new Sandbox)
     Ctrl->>Ctrl: validate spec
-    Ctrl->>API: create sandbox Pod (requests devices.microsandbox.io/kvm: 1)
+    Ctrl->>API: create sandbox Pod (requests devices.microsandbox.io/kvm: 1, mounts referenced Secrets read-only)
     Ctrl->>API: patch Sandbox.status.phase = Pending
     API->>API: schedule Pod to KVM-capable node
 
-    Note over Pre: init container starts
-    Pre->>API: get Secret values (secretKeyRef)
-    API-->>Pre: secret values
-    Pre->>Pre: write /msb-config/sandbox.json (mode 0600), copy msb binary, copy libkrunfw.so
-    Note over Pre: exit(0) — kubelet starts main containers
-
     Note over Runtime: msb-runtime container starts
-    Runtime->>Runtime: read sandbox.json from emptyDir, exec msb start (config via fd 96, not argv)
+    Runtime->>Runtime: read Secret volumes, resolve in-process (no resolved-config file written)
+    Runtime->>Runtime: build boot config via the SDK, exec msb start
     Runtime->>Runtime: libkrun boots guest VM, smoltcp proxy starts
 
     API-->>Daemon: watch event — Pod Running on this node
@@ -256,7 +247,6 @@ sequenceDiagram
 |-----------|------|------|
 | `msb-controller` | `Deployment` (leader election) | Watches `Sandbox` CRDs cluster-wide; creates/deletes sandbox pods; syncs CRD status |
 | `msb-daemon` | `DaemonSet` | Per-node; watches sandbox pods; tracks PID via SQLite; re-adopts live sandboxes on restart; annotates pods with termination reason |
-| `msb-prerunner` | Init container (per pod) | Resolves `secretKeyRef` values; writes resolved `msb` config to shared `emptyDir`; copies `msb` binary and `libkrunfw.so` |
 | `msb-runtime` | Container (per pod) | Runs `msb` in detached mode (started by the daemon); hosts the guest VM and smoltcp proxy |
 | `msb-bridge` | Sidecar container (per pod) | WebSocket → `agent.sock` bridge; port configurable, default 7000; injected automatically by the controller; SDK clients connect here |
 | `msb-gateway` | `Deployment` (opt-in) | Speaks msb's cloud API so the unmodified SDK drives the cluster; lifecycle REST and exec WebSocket; off by default |
@@ -326,7 +316,7 @@ DaemonSet on every node.
 
 **Responsibilities:**
 - Watch Pods on its own node that carry label `microsandbox.io/sandbox: "true"`
-- When a sandbox Pod becomes Running: deserialize `/msb-config/sandbox.json` into typed Rust structs and call `Sandbox::create_detached()` via the **msb Rust SDK**. The SDK passes config over fd 96 (`CONFIG_FD`); secrets stay off argv. Detached mode: no watchdog pipe, sandbox calls `setsid()`, survives daemon restarts as an independent OS process. Gap: `ProcessHandle::from_pid()` does not exist in the SDK today, so re-adoption uses `kill(pid, 0)` polling as an interim (see pidfd_open TODO below).
+- When a sandbox Pod becomes Running: the `msb-runtime` container has booted `msb` in detached mode via the **msb Rust SDK** (config built in-process, off argv). Detached mode: no watchdog pipe, sandbox calls `setsid()`, survives daemon restarts as an independent OS process. Gap: `ProcessHandle::from_pid()` does not exist in the SDK today, so re-adoption uses `kill(pid, 0)` polling as an interim (see pidfd_open TODO below).
 - On graceful shutdown: send SIGTERM to each live msb child process. Detached mode creates no watchdog pipe, so there is nothing to disarm; SIGTERM is the shutdown signal.
 - Track the child PID in SQLite; on exit, read termination reason, annotate the Pod
 - On startup: query SQLite for sandboxes marked `Running`; probe each PID with `kill(pid, 0)`; re-adopt live ones by reconnecting to their agent socket; mark dead ones Crashed and annotate their pods
@@ -339,25 +329,6 @@ Liveness check:
 fn process_exists(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
-```
-
-#### msb-prerunner (init container)
-
-Runs once per pod before `msb-runtime` starts. Three responsibilities:
-
-1. **Secret resolution**: reads the `Sandbox` spec (passed as a base64-encoded env var by the controller), resolves each `secretKeyRef` by calling the Kubernetes API, writes a fully-resolved `msb` JSON config to `/msb-config/sandbox.json` on the shared `emptyDir`
-
-2. **Binary sideload**: copies the `msb` binary from the prerunner image into `/msb-bin/msb` on a second `emptyDir` so the runtime container does not need `msb` pre-installed
-
-3. **libkrunfw injection**: copies `libkrunfw.so` from the prerunner image into a third `emptyDir` (`/msb-lib/`). `msb-runtime` gets `MSB_LIBKRUNFW_PATH=/msb-lib/libkrunfw.so` as an env var injected by the controller. This ensures `msb` finds the library regardless of what base image the user specifies. `MSB_LIBKRUNFW_PATH` is the tier-1 resolution path; checked before any filesystem search, hard error if set but missing.
-
-```mermaid
-flowchart LR
-    A["base64_decode(MSB_SANDBOX_SPEC)"] --> B["resolve secretKeyRef values\nvia k8s API"]
-    B --> C["write /msb-config/sandbox.json\nto emptyDir (mode 0600)"]
-    C --> D["copy msb binary → /msb-bin/msb"]
-    D --> E["copy libkrunfw.so → /msb-lib/"]
-    E --> F["exit(0)"]
 ```
 
 #### Device Plugin
@@ -544,7 +515,7 @@ Retry requeue uses an explicit `Action::requeue(duration)`. kube-rs automatic ex
 
 **Controller-injected containers:** The controller automatically adds `msb-bridge` as a second container in every sandbox pod and creates a `ClusterIP` Service for it. Users do not declare the bridge in the `Sandbox` spec; it is always present.
 
-**Secret handling:** Secret values are resolved by the prerunner at pod startup and never appear in CRD fields, Pod env vars, or logs.
+**Secret handling:** Secret values are resolved by the runtime at pod startup, from Secrets the kubelet mounts read-only, and never appear in CRD fields, Pod env vars, or logs.
 
 ### Storage Model
 
@@ -651,12 +622,12 @@ The controller and daemon never share a private channel. The Kubernetes API is t
 
 | Data | Kubernetes API | Node-local | Notes |
 |------|---------------|------------|-------|
-| Sandbox spec (image, resources, policy) | Yes, source of truth | Yes, working copy written by prerunner | Kubernetes API wins on conflict |
+| Sandbox spec (image, resources, policy) | Yes, source of truth | Yes, working copy read by the runtime | Kubernetes API wins on conflict |
 | Sandbox phase / status | Yes | Yes | Daemon observes node; controller writes to Kubernetes API |
 | Running PID | No | Yes | Only meaningful on the node; controller never reads it |
 | Termination reason | Yes | Yes | Daemon observes exit, annotates Pod; controller copies to CRD status |
 | OCI image layer cache | No | Yes | Node-local; Kubernetes API is the wrong place |
-| Secret values | Never | Never | Resolved at runtime by prerunner; in memory only |
+| Secret values | Never | On the kubelet's Secret mount | Read-only volume, like any pod's `secretKeyRef`; the runtime resolves it in-process |
 
 #### Failure modes
 
@@ -811,25 +782,21 @@ Secrets in microsandbox are per-sandbox, declared as `SecretEntry` structs insid
 - `allowed_hosts`: which hosts the proxy is permitted to substitute this value to
 - `require_tls_identity`: only substitute after TLS SNI verification (default: true)
 
-The `NetworkConfig` (including all `SecretEntry.value` fields) is part of `LaunchConfig`. The SDK serializes `LaunchConfig` as JSON and passes it to `msb start` over **fd 96** (`CONFIG_FD`), kept off argv and `/proc/<pid>/cmdline` to prevent leakage via `ps`. The proxy intercepts outbound HTTP/HTTPS, finds the placeholder in headers/body/auth, and substitutes the real value. All substitution happens inside the `msb` process, invisible to the guest.
+The `NetworkConfig` (including all `SecretEntry.value` fields) is part of `LaunchConfig`. The runtime builds it in-process and hands it to the SDK, so the values stay in memory and never reach argv or `/proc/<pid>/cmdline`. The proxy intercepts outbound HTTP/HTTPS, finds the placeholder in headers/body/auth, and substitutes the real value. All substitution happens inside the `msb` process, invisible to the guest.
 
 #### Secret handling chain in Kubernetes
 
-The prerunner needs to build a fully-resolved `LaunchConfig` with real `SecretEntry.value` fields populated before `msb start` runs. Secret values cannot be mounted as files because they go into a specific field inside a structured JSON blob that also contains network config, rootfs paths, slot number, and lifecycle config.
-
-The prerunner runs inside the pod, in the sandbox's namespace, with a namespace-scoped ServiceAccount that can only read secrets in that namespace:
+The runtime builds a `LaunchConfig` with real `SecretEntry.value` fields populated before `msb start` runs. The controller mounts each referenced Secret as a read-only volume; the kubelet performs the read, so no component holds Secret API access.
 
 ```mermaid
 flowchart TD
     A["Kubernetes Secret<br/>(namespace-scoped)"]
-    B["msb-prerunner (init container)<br/>reads secretKeyRef values via k8s API<br/>builds fully-resolved LaunchConfig JSON<br/>writes to emptyDir mode 0600"]
-    C["/msb-config/sandbox.json<br/>emptyDir — not in image layer, not in env vars, not in logs"]
-    D["msb-runtime<br/>reads /msb-config/sandbox.json from emptyDir<br/>passes to msb start via fd 96 (CONFIG_FD)<br/>SecretEntry.value in memory only<br/>guest sees only placeholder string"]
+    C["/msb-secrets/&lt;name&gt;/&lt;key&gt;<br/>read-only volume, kubelet-mounted<br/>only the referenced keys projected"]
+    D["msb-runtime<br/>reads the volume, resolves in-process<br/>builds LaunchConfig (not written to disk)<br/>guest sees only placeholder string"]
     E["smoltcp proxy<br/>intercepts outbound HTTP/HTTPS<br/>substitutes placeholder → real value<br/>only to allowed_hosts · never logs · blocks violations"]
 
-    A -->|"RBAC: prerunner SA can read Secrets in namespace"| B
-    B --> C
-    C -->|"read from emptyDir, passed via fd 96 not argv"| D
+    A -->|"kubelet mounts referenced Secret read-only"| C
+    C --> D
     D --> E
 ```
 
@@ -837,13 +804,13 @@ Secret values never appear in: CRD spec/status, Pod env vars, container argv, im
 
 #### RBAC
 
-Three ServiceAccounts, each scoped to the minimum needed:
+Two ServiceAccounts, each scoped to the minimum needed. No component has Secret API access: the kubelet mounts referenced Secrets, so the pod reads them off a volume under the default ServiceAccount.
 
-**`msb-controller`** has a ClusterRole covering Sandbox CRDs, pods, services, events, and leases. It also needs `rbac.authorization.k8s.io/roles` and `rolebindings` create/delete to provision the per-namespace prerunner Role on first Sandbox creation in a namespace. It has no secrets access.
+**`msb-controller`** has a ClusterRole covering Sandbox CRDs, pods, services, events, and leases. It has no secrets access.
 
 **`msb-daemon`** has a ClusterRole with `pods: patch` (to write termination annotations) and `nodes: get`. The node read is cluster-wide because RBAC cannot scope to a single node via fieldSelector; this is a known over-permission. The pod patch is similarly cluster-wide, which means a compromised daemon on one node could annotate pods it does not own. Both are V1 limitations acknowledged here; the Helm chart should document them.
 
-**`msb-prerunner`** has a namespace-scoped Role with `secrets: get`. The Role covers all secrets in the namespace; RBAC has no mechanism to restrict to only the secrets a specific Sandbox references. The prerunner is the only component with any secrets access.
+Mounting the Secret exposes the pod to exactly the Secrets it references and nothing more — tighter than an API read, which RBAC can only grant across all Secrets in a namespace.
 
 `Sandbox` is namespace-scoped, so standard Kubernetes isolation applies: RBAC, `ResourceQuota`, and `NetworkPolicy` all work identically to pods. Two aggregated ClusterRoles (`sandbox-operator`, `sandbox-viewer`) are shipped with the Helm chart for tenants to bind into their own namespaces via RoleBinding. Quotas use `count/sandboxes.sandbox.microsandbox.io`; all create/delete operations appear in the audit log with caller identity.
 
@@ -947,10 +914,8 @@ Each request carries a bearer token: a TokenReview validates it, then a SubjectA
 | `sandboxes.sandbox.microsandbox.io` | `CustomResourceDefinition` | v1alpha1 |
 | `msb-controller` | `ClusterRole` + `ClusterRoleBinding` | |
 | `msb-daemon` | `ClusterRole` + `ClusterRoleBinding` | |
-| `msb-prerunner` | `Role` + `RoleBinding` (per ns, created by controller on first sandbox in namespace) | Secret read access |
 | `msb-controller` | `ServiceAccount` | |
 | `msb-daemon` | `ServiceAccount` | |
-| `msb-prerunner` | `ServiceAccount` | |
 
 No ingress, no service mesh, no storage classes, no cert-manager dependency.
 
@@ -989,9 +954,9 @@ _Mitigation:_ Operator creates sandbox namespaces with `enforce: baseline`. No p
 
 **4. Secret leakage surface**
 
-Secrets transit through: k8s API (prerunner reads them), emptyDir (sandbox.json), fd 96 (passed to msb), and msb process memory. Each is a potential leak surface.
+Secrets transit through: the kubelet-mounted read-only volume, and the runtime/msb process memory. Each is a potential leak surface.
 
-_Mitigation:_ emptyDir written mode 0600 by prerunner. fd 96 is not visible in `/proc/<pid>/cmdline`. msb keeps values in memory only. The guest never sees real values. The proxy never logs substituted values. No secret appears in CRD spec, Pod env vars, or container argv.
+_Mitigation:_ the volume holds only the referenced Secret keys and is never written by us. The runtime keeps resolved values in memory only, off argv and `/proc/<pid>/cmdline`. The guest never sees real values. The proxy never logs substituted values. No secret appears in CRD spec, Pod env vars, or container argv.
 
 ---
 
@@ -1023,7 +988,7 @@ All three storage layers are node-local sparse files managed by `msb` on the hos
 
 **Decision: no webhook for V1.**
 
-Field validation beyond what OpenAPI schema expresses is handled by [`x-kubernetes-validations` CEL rules](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules) in the CRD itself. Spec defaulting is handled by `default:` fields in the CRD OpenAPI schema. Cross-resource checks (e.g. "does this Secret exist?") are handled by the prerunner at runtime; if the secret is missing, the pod fails to start, same behaviour as a pod with a bad `secretKeyRef`. Image policy is better delegated to an existing policy engine (OPA/Gatekeeper, Kyverno).
+Field validation beyond what OpenAPI schema expresses is handled by [`x-kubernetes-validations` CEL rules](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules) in the CRD itself. Spec defaulting is handled by `default:` fields in the CRD OpenAPI schema. Cross-resource checks (e.g. "does this Secret exist?") fall out of the Secret mount; if a referenced Secret is missing, the kubelet cannot mount it and the pod fails to start, same behaviour as any pod with a bad `secretKeyRef`. Image policy is better delegated to an existing policy engine (OPA/Gatekeeper, Kyverno).
 
 **Rejected: validating/mutating admission webhook.** The operational cost (TLS cert management, availability requirement: a broken webhook blocks all Sandbox creates cluster-wide) is not justified when CRD schema validation and external policy engines cover the same ground. Add a webhook only when a concrete gap is found post-MVP.
 
@@ -1043,15 +1008,11 @@ Data movement between PVCs uses [CDI](https://github.com/kubevirt/containerized-
 
 The daemon writes `terminationReason` to a Pod annotation; the controller reads it and copies it into `Sandbox.status`. This keeps the controller as the sole writer of CRD status, but creates a race for `ephemeral: true` sandboxes: ownerRef cascade GCs the pod immediately on CRD deletion, and the controller may not read the annotation in time. The alternative is for the daemon to patch `Sandbox.status.terminationReason` directly, which eliminates the race but introduces two writers on the status subresource. A partitioned status object (`status.node` owned by daemon, `status.phase` owned by controller) is the natural resolution but the right shape is unresolved.
 
-**3. Secret delivery at rest: emptyDir vs in-memory pipe**
-
-The prerunner writes a fully-resolved `LaunchConfig` JSON (including plaintext secret values) to an emptyDir at `mode 0600`. The file persists for the entire pod lifetime; anything with `kubectl exec` access or node filesystem access can read it. The alternative is an in-memory transfer: prerunner holds the resolved config in memory and passes it to `msb-runtime` over a shared pipe or `memfd`, never touching a filesystem path. The tradeoff is implementation complexity (cross-container communication before the main container starts is awkward with init containers) against a meaningful reduction in at-rest exposure. Whether `mode 0600 emptyDir` is acceptable depends on the threat model: it is sufficient if the boundary is cluster-admin access, insufficient if namespace tenants can `kubectl exec`.
-
-**4. msb-bridge: universal sidecar vs opt-in**
+**3. msb-bridge: universal sidecar vs opt-in**
 
 The controller injects `msb-bridge` into every sandbox pod unconditionally. For ephemeral task-runner sandboxes (`runPolicy: Once`, no `publishedPorts`), the bridge is unreachable before the sandbox exits; it adds a container, an image pull, and a Service with no benefit. The counterargument is operational simplicity: no conditional controller logic, no user-facing knob to set wrong, and the SDK always works against any sandbox. The unresolved question is whether a `spec.access.bridge: false` field is worth the controller complexity, or whether making the bridge image small enough renders the cost negligible.
 
-**5. Management socket and lifecycle operations**
+**4. Management socket and lifecycle operations**
 
 The daemon currently manages `msb` by spawning a subprocess and scraping SQLite. A management socket on `msb`, analogous to Cloud Hypervisor's `/run/cloud-hypervisor.sock` used by Virtink, would replace polling with typed RPCs and unlock operations that are not cleanly expressible today:
 
@@ -1063,7 +1024,7 @@ The daemon currently manages `msb` by spawning a subprocess and scraping SQLite.
 
 The `agentd` relay socket already exists for exec/file operations; the question is whether lifecycle operations warrant a second socket. The trigger to add it is a concrete requirement (graceful shutdown for databases, pause for snapshotting) that cannot be built cleanly on top of signal+polling.
 
-**6. Snapshot CRDs**
+**5. Snapshot CRDs**
 
 `msb` has a complete offline snapshot system (CLI, Rust and Python SDKs, manifest with integrity verification). The primitives exist; the question is the Kubernetes API shape. The idiomatic pattern, following VolumeSnapshot and KubeVirt VirtualMachineSnapshot, is three CRDs: `SandboxSnapshot` (namespace-scoped, user-created), `SandboxSnapshotContent` (controller-managed, holds the artifact reference), and `SandboxSnapshotClass` (cluster-scoped, admin-facing). Boot-from-snapshot on `SandboxSpec` uses a typed `bootSource.snapshotRef` rather than an untyped string. The snapshot content backend maps naturally onto a PVC once named volumes move off `hostPath`.
 
