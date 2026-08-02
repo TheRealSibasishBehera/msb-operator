@@ -773,7 +773,7 @@ flowchart TD
     relay["relay process\n(up to 128 concurrent clients,\nnon-overlapping frame ID ranges)"]
     agentd["agentd (PID 1 inside guest)"]
 
-    SDK -->|"agent.sock\n~/.microsandbox/run/agent/{sha256(name)[:32]}.sock"| relay
+    SDK -->|"agent.sock\n$MSB_HOME/run/agent/{hex(sha256(name)[:16])}.sock"| relay
     relay -->|"virtio-serial\n(independent of smoltcp)"| agentd
 ```
 
@@ -785,7 +785,7 @@ The agent protocol wire format is:
 
 `[len: u32 BE][id: u32 BE][flags: u8][CBOR(version, type, payload)]`
 
-The `id` (correlation ID) and `flags` fields sit **outside** the [CBOR](https://www.rfc-editor.org/rfc/rfc8949) payload. The full frame prefix is 9 bytes: `len` (4) + `id` (4) + `flags` (1). Relay intermediaries read those 9 bytes, make routing decisions, and forward frames without deserializing the CBOR payload.
+The `id` (correlation ID) and `flags` fields sit **outside** the [CBOR](https://www.rfc-editor.org/rfc/rfc8949) payload. The full frame prefix is 9 bytes: `len` (4) + `id` (4) + `flags` (1). The relay inside the guest reads those 9 bytes to multiplex clients; the operator's bridge does not — it forwards raw bytes without inspecting frames.
 
 `AgentClient` exposes raw protocol access via `stream_raw` and `send_raw`; these send raw CBOR frames without SDK parsing. `AgentClient::connect_stream` accepts any `AsyncRead + AsyncWrite`, so wrapping a WebSocket connection into that interface is the only glue code needed.
 
@@ -796,29 +796,26 @@ The `id` (correlation ID) and `flags` fields sit **outside** the [CBOR](https://
 | `agent.sock` direct | UDS (local only) | no | yes, full SDK surface |
 | WebSocket bridge (V1) | TCP/WebSocket | yes | yes, via `AgentClient::connect_stream` |
 | Cloud gateway | HTTP + WebSocket | yes | yes, the unmodified SDK via `MSB_API_URL` |
-| `msb ssh serve` | TCP/SSH | yes | no, interactive shell only |
-
-`msb ssh serve` binds a real TCP listener (default port 2222). Exposed via a Kubernetes Service it gives interactive shell access from outside the pod without any gateway.
 
 #### V1: WebSocket bridge sidecar
 
-`agent.sock` is a Unix domain socket, reachable within the pod but not from outside. The bridge makes it network-accessible: it runs as a sidecar in the sandbox pod, accepts WebSocket connections on TCP port 7000, and forwards frames verbatim to `agent.sock`. No CBOR parsing; it moves bytes. The controller creates a `ClusterIP` Service per sandbox so SDK clients elsewhere in the cluster can reach it.
+`agent.sock` is a Unix domain socket, reachable within the pod but not from outside. The bridge makes it network-accessible: it runs as a sidecar in the sandbox pod, accepts WebSocket connections on TCP port 7000, and copies bytes verbatim to `agent.sock` — no CBOR parsing, no framing. The controller creates a `ClusterIP` Service per sandbox so SDK clients elsewhere in the cluster can reach it.
 
 ```mermaid
 flowchart TD
     client["external SDK client"]
     svc["Kubernetes ClusterIP Service"]
     bridge["msb-bridge sidecar\n(in sandbox pod, default port 7000)"]
-    sock["agent.sock\n(sandbox name → sha256[:32].sock)"]
+    sock["agent.sock\n(hex(sha256(name)[:16]).sock)"]
     agentd["agentd inside guest"]
 
-    client -->|"WebSocket\nws://sandbox-name.namespace.svc.cluster.local:7000"| svc
+    client -->|"WebSocket\nws://msb-<hash>.namespace.svc.cluster.local:7000"| svc
     svc --> bridge
-    bridge -->|"raw frame forwarding\n9-byte framed frames verbatim"| sock
+    bridge -->|"raw byte forwarding (no frame parsing)"| sock
     sock -->|"virtio-serial"| agentd
 ```
 
-On each incoming WebSocket connection the bridge dials `agent.sock`, reads the 8-byte handshake prologue (`id_min u32 BE + id_max u32 BE`) and the `core.ready` frame, sends them together as the first WebSocket message, then enters bidirectional byte forwarding. If the dial fails (sandbox restarting), it retries with backoff; the socket path is deterministic from the sandbox name so no re-discovery is needed.
+On each incoming WebSocket connection the bridge dials `agent.sock` and copies bytes in both directions — a transparent splice. It does not parse the handshake prologue or any frame; the SDK owns the protocol end to end, and the bridge is oblivious to it. If the dial fails (sandbox restarting), it retries with backoff; the socket path is deterministic from the sandbox name so no re-discovery is needed.
 
 The bridge also exposes `POST /control` on its health port: it relays one JSON request to the sandbox's control socket (`<sandbox>.control.sock`) and returns the reply. The controller uses it to apply a live cpu/memory resize, reaching the socket through the per-sandbox Service instead of exec'ing into the pod.
 
