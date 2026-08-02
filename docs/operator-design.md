@@ -22,11 +22,10 @@
   - [Storage Model](#storage-model)
     - [What the guest filesystem looks like](#what-the-guest-filesystem-looks-like)
     - [Node-local files via hostPath](#node-local-files-via-hostpath)
-    - [The three storage layers](#the-three-storage-layers)
+    - [The two storage layers](#the-two-storage-layers)
     - [Image cache](#image-cache)
     - [Writable upper layer](#writable-upper-layer)
-    - [Named volumes](#named-volumes)
-    - [Node pinning policy](#node-pinning-policy)
+    - [Scheduling and node affinity](#scheduling-and-node-affinity)
   - [State Model](#state-model)
     - [State ownership](#state-ownership)
     - [Failure modes](#failure-modes)
@@ -83,7 +82,7 @@ Running `msb` inside Kubernetes pods is non-trivial: it requires KVM device acce
 ### Non-Goals
 
 - **Live migration**: sandboxes are ephemeral; kill and reschedule
-- **General-purpose PVC integration**: no StorageClass provisioning, no shared network storage (NFS/Ceph), no automatic data migration across nodes. Named volumes are node-local in V1 and stay outside Kubernetes' storage jurisdiction by design.
+- **Persistent sandbox storage**: no StorageClass provisioning, no PVC-backed or shared network storage (NFS/Ceph), no data migration across nodes. V1 sandboxes are storage-free beyond the ephemeral upper layer; persistent storage is future work.
 - **Device hotplug**: no live attach/detach of block or network devices after boot
 - **Resize beyond the boot envelope**: `cpus`/`memory` resize live only up to the `maxCpus`/`maxMemory` reserved at boot; growing past that ceiling needs a restart
 - **Sandbox-to-sandbox networking**: same isolation model as local `msb`
@@ -474,16 +473,10 @@ spec:
       soft: 1024
       hard: 4096
 
-  # Storage — named volumes (node-local, persist across sandbox runs)
-  volumes:
-    - name: workspace
-      mountPath: /workspace
-      size: 10Gi       # sparse ext4, managed by msb-daemon on the node
-
 status:
   phase: Running             # Pending | Running | Stopped | Succeeded | Failed — written by controller
   podName: sandbox-my-sandbox-a1b2c  # written by controller at pod creation
-  nodeName: node-1           # written by controller when pod is scheduled; read back on restart for node pinning
+  nodeName: node-1           # where the pod was scheduled (a Node print column)
   startedAt: "2026-06-29T10:00:00Z"  # written by controller when phase transitions to Running
   terminatedAt: null         # written by controller when phase transitions to Succeeded/Failed
   # Source: daemon annotation (msb native)
@@ -561,7 +554,7 @@ graph LR
 
 #### Node-local files via hostPath
 
-`msb` needs access to files on the node's filesystem: the VMDK image cache, `upper.ext4`, named volume files. The pod runs on that same node. The operator uses a `hostPath` volume pointing at `~/.microsandbox/` on the node, mounted into the `msb-runtime` container at the same path:
+`msb` needs access to files on the node's filesystem: the VMDK image cache and `upper.ext4`. The pod runs on that same node. The operator uses a `hostPath` volume pointing at `~/.microsandbox/` on the node, mounted into the `msb-runtime` container at the same path:
 
 ```yaml
 volumes:
@@ -576,18 +569,17 @@ containers:
         mountPath: /root/.microsandbox
 ```
 
-`hostPath` bypasses k8s storage accounting, intentional for a cache `msb` manages entirely. Downsides: scheduler is blind to disk consumption, named volumes have no PVC lifecycle, node pinning is manual via `pod.spec.nodeName`.
+`hostPath` bypasses k8s storage accounting, intentional for a cache `msb` manages entirely. Downside: the scheduler is blind to disk consumption.
 
 > [!NOTE]
-> The image cache is read-only and shared across sandboxes on the same node; `hostPath` is permanently the right primitive for it. The real problems are with stateful sandboxes: a persistent upper layer or named volume is physically locked to the node where the sandbox first ran. Node loss means data loss, and there is no way to move data to another node. These are the layers that future work would target with PVC-backed storage.
+> The image cache is read-only and shared across sandboxes on the same node; `hostPath` is permanently the right primitive for it. Stateful storage that would need to survive node loss (a persistent upper layer, or PVC-backed volumes) is future work; V1 has none.
 
-#### The three storage layers
+#### The two storage layers
 
 | Layer | What it is | Ephemeral? | Shared? | k8s aware? |
 |-------|-----------|------------|---------|-----------|
 | **Image cache** (EROFS/VMDK) | OCI layers converted to EROFS, cached on node | No, persists until evicted | Yes, all sandboxes on the same node sharing the same image | No, managed by msb-daemon |
 | **Writable upper** (`upper.ext4`) | Sparse ext4 capturing all guest writes | Yes, deleted on exit | No, one per sandbox | No, node-local file in sandbox state dir |
-| **Named volumes** | Additional sparse ext4 disks at explicit mount paths | No, survive sandbox exit | No, one per volume name | No, node-local files in `~/.microsandbox/volumes/` |
 
 #### Image cache
 
@@ -597,39 +589,9 @@ OCI layers are pulled once, converted to EROFS, and cached at `~/.microsandbox/c
 
 `upper.ext4` is created fresh each run and deleted on exit (task-runner behaviour). The size is configurable via `upper.size` (default `4Gi`). There is no retain-across-runs flag in current `msb`; every run starts from a clean upper layer.
 
-#### Named volumes
+#### Scheduling and node affinity
 
-Named volumes are separate sparse ext4 files managed by the daemon as additional virtio-blk devices inside the guest. In V1 they are node-local:
-
-- The daemon creates and manages the volume file on the node filesystem
-- The sandbox pod is hard-pinned to the node
-- Volume lifecycle is managed by the daemon; k8s has no visibility
-- If the node is lost, the volume data is lost (accepted constraint for V1)
-
-```mermaid
-graph LR
-    crd["Sandbox CRD<br/>volumes:<br/>  - name: workspace<br/>    mountPath: /workspace<br/>    size: 10Gi"]
-    daemon["msb-daemon<br/>creates ~/.microsandbox/volumes/workspace.ext4<br/>if not exists<br/>passes path to msb (detached)"]
-    msb["msb process<br/>mounts as virtio-blk /dev/vdc<br/>inside guest at /workspace"]
-
-    crd --> daemon
-    daemon --> msb
-```
-
-#### Node pinning policy
-
-Sandboxes with named volumes or `ephemeral: false` are pinned to the node where they first ran. The controller sets `pod.spec.nodeName` (a hard assignment, not an affinity). If the node is unavailable, the pod stays `Pending` rather than rescheduling to a node with no data.
-
-| Sandbox type | Node pinning | Node loss behavior |
-|---|---|---|
-| Ephemeral (default) | None; scheduler decides freely | Pod rescheduled to any KVM-capable node |
-| `ephemeral: false` (upper layer retained), no named volumes | Hard `nodeName` pin after first run; controller reads `Sandbox.status.nodeName` on restart | Pod stays `Pending` until node returns; **without this pin the pod silently boots on a different node with a blank upper layer** |
-| Named volumes declared | Hard `nodeName` pin | Pod stays `Pending` until node returns |
-
-The pin is set at pod creation time. On subsequent starts, the controller reads `Sandbox.status.nodeName` and sets `pod.spec.nodeName` to match.
-
-> [!NOTE]
-> Hard `nodeName` is a V1 shortcut. With PVC-backed storage, node pinning would become implicit via PV `nodeAffinity` and `WaitForFirstConsumer` binding, removing the need to hard-code `nodeName`.
+Sandbox pods carry no `nodeName` or affinity; the scheduler places them freely on any KVM-capable node. `status.nodeName` reports where a pod landed and surfaces as a `Node` print column. With persistent, node-local storage, scheduling would need to follow the data, via PV `nodeAffinity` and `WaitForFirstConsumer` binding.
 
 ### State Model
 
@@ -954,11 +916,11 @@ The operator sets `hostBind: 0.0.0.0` automatically for any `publishedPorts` ent
 
 ## Risks and Mitigations
 
-**1. hostPath and node affinity**
+**1. hostPath**
 
-`hostPath` volumes tie sandbox state to a node. Node loss means data loss for stateful sandboxes. The scheduler can still place a `nodeName`-pinned pod on a gone node and leave it `Pending` indefinitely.
+The `msb-runtime` container mounts a `hostPath` for the node-local image cache and upper layer. In V1 nothing on it needs to survive a reschedule (the upper layer is ephemeral, the cache is rebuildable), so node loss costs no sandbox data. `hostPath` becomes a real constraint only once persistent storage lands.
 
-_Mitigation:_ Hard `nodeName` pin prevents silent rescheduling to a different node with no data. Node loss timeout in the controller marks the CRD Failed after a configurable period. Document the trade-off: stateful sandboxes require node availability.
+_Mitigation:_ none needed in V1 — a rescheduled pod cold-boots cleanly, losing nothing. The node-loss timeout still marks a Sandbox Failed after a configurable period. This becomes a real trade-off to design for when persistent storage lands.
 
 **2. No KVM emulation fallback**
 
@@ -1002,7 +964,7 @@ The WebSocket bridge runs as a second container in the sandbox pod. One bridge p
 
 **Decision: raw node-local for V1.**
 
-All three storage layers are node-local sparse files managed by `msb` on the host filesystem; no StorageClass, no PVC required. The image cache (EROFS) and ephemeral upper layer have no storage problem: the former is read-only and inherently node-local, the latter is thrown away on exit. The two stateful layers (persistent upper and named volumes) have a node-pinning and data loss problem. The V2 direction, PVC-backed storage with CDI as the data movement layer, is discussed in [Open Questions #2](#open-questions).
+Both storage layers are node-local sparse files managed by `msb` on the host filesystem; no StorageClass, no PVC required. Neither poses a storage problem in V1: the image cache (EROFS) is read-only and inherently node-local, and the upper layer is thrown away on exit. Persistent, node-survivable storage is future work; the PVC-backed direction is discussed in [Open Questions](#open-questions).
 
 ### Webhook admission vs CEL rules
 
@@ -1016,11 +978,9 @@ Field validation beyond what OpenAPI schema expresses is handled by [`x-kubernet
 
 ## Open Questions
 
-**1. Stateful storage: node pinning and PVC-backed volumes**
+**1. Stateful storage: PVC-backed volumes**
 
-`upper.ext4` and named volumes are raw files on the host, invisible to the scheduler. `ephemeral: false` looks like a "keep my changes" flag, but a restart on a different node boots with a blank upper layer and no error. V1 mitigates this with a hard `nodeName` patch, which prevents silent data loss but permanently ties the sandbox to a node the user never chose.
-
-The V2 direction is PVC-backed storage. PVCs with `WaitForFirstConsumer` let the scheduler pick the node first; the provisioner creates the volume there. PVCs would be deterministically named (`upper-{sandbox}`, `vol-{sandbox}-{name}`), created before the pod, and reattached on restart. `msb` sees them as block devices, identical to current sparse files from its perspective. `ReadWriteOncePod` (RWOP, GA in 1.29) is the right access mode; `ReadWriteOnce` allows multiple pods on the same node to mount the same PVC simultaneously.
+V1 sandboxes are stateless: the upper layer is a raw host file thrown away on exit, and nothing survives a restart or a reschedule. Persistent, node-survivable storage is the V2 direction, backed by PVCs. PVCs with `WaitForFirstConsumer` let the scheduler pick the node first; the provisioner creates the volume there. PVCs would be deterministically named (`upper-{sandbox}`, `vol-{sandbox}-{name}`), created before the pod, and reattached on restart. `msb` sees them as block devices, identical to current sparse files from its perspective. `ReadWriteOncePod` (RWOP, GA in 1.29) is the right access mode; `ReadWriteOnce` allows multiple pods on the same node to mount the same PVC simultaneously.
 
 Data movement between PVCs uses [CDI](https://github.com/kubevirt/containerized-data-importer). CDI selects the best available clone strategy: CSI native clone (no network I/O, requires same StorageClass), VolumeSnapshot clone (requires a VolumeSnapshotClass), or host-assisted clone (bytes stream over the network, works across any two StorageClasses). CDI never sets node affinity on cloned PVCs; topology is the CSI driver's concern. This requires a clean `msb` API for booting from a pre-existing block device path.
 
@@ -1046,7 +1006,7 @@ The `agentd` relay socket already exists for exec/file operations; the question 
 
 **5. Snapshot CRDs**
 
-`msb` has a complete offline snapshot system (CLI, Rust and Python SDKs, manifest with integrity verification). The primitives exist; the question is the Kubernetes API shape. The idiomatic pattern, following VolumeSnapshot and KubeVirt VirtualMachineSnapshot, is three CRDs: `SandboxSnapshot` (namespace-scoped, user-created), `SandboxSnapshotContent` (controller-managed, holds the artifact reference), and `SandboxSnapshotClass` (cluster-scoped, admin-facing). Boot-from-snapshot on `SandboxSpec` uses a typed `bootSource.snapshotRef` rather than an untyped string. The snapshot content backend maps naturally onto a PVC once named volumes move off `hostPath`.
+`msb` has a complete offline snapshot system (CLI, Rust and Python SDKs, manifest with integrity verification). The primitives exist; the question is the Kubernetes API shape. The idiomatic pattern, following VolumeSnapshot and KubeVirt VirtualMachineSnapshot, is three CRDs: `SandboxSnapshot` (namespace-scoped, user-created), `SandboxSnapshotContent` (controller-managed, holds the artifact reference), and `SandboxSnapshotClass` (cluster-scoped, admin-facing). Boot-from-snapshot on `SandboxSpec` uses a typed `bootSource.snapshotRef` rather than an untyped string. The snapshot content backend maps naturally onto a PVC once persistent storage moves off `hostPath`.
 
 ---
 
