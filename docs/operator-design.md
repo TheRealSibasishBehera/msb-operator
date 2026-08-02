@@ -399,6 +399,16 @@ spec:
   # Command to run inside the guest (optional; defaults to image entrypoint)
   cmd: ["python", "script.py"]
 
+  # Guest process shape (all optional)
+  entrypoint: ["/bin/sh", "-c"]   # overrides the image entrypoint
+  env:                            # plain, non-secret env vars (secrets use `secrets:`)
+    - name: LOG_LEVEL
+      value: debug
+  workdir: /app
+  shell: /bin/bash
+  user: "1000"
+  hostname: sandbox-1
+
   # Once (default) or RerunOnFailure
   runPolicy: Once
 
@@ -456,6 +466,13 @@ spec:
   # Storage — writable upper layer size (resource.Quantity)
   upper:
     size: 4Gi
+
+  # Guest hardening, enforced in-guest by agentd (needs no host privilege)
+  securityProfile: Restricted   # Default | Restricted (no_new_privs, drop CAP_SYS_ADMIN, nosuid/nodev mounts)
+  rlimits:                       # POSIX rlimits applied at guest PID 1, inherited by all processes
+    - resource: Nofile          # one of the 16 RLIMIT_* resources
+      soft: 1024
+      hard: 4096
 
   # Storage — named volumes (node-local, persist across sandbox runs)
   volumes:
@@ -771,6 +788,9 @@ spec:
 - `supplementalGroups: [<kvm-gid>]`: `/dev/kvm` is `crw-rw---- root:kvm`. The device plugin handles the kernel cgroup allowlist but not Unix DAC; the process must be in the kvm group to open the device. The kvm GID is node-dependent and not standardised; Ubuntu 24.04 assigns it dynamically. The operator or Helm chart must accept it as a configuration value, read it from a node label, or require a udev rule on the node that pins it to a known value (KubeVirt's approach).
 - `MSB_HOME` pointing to a writable path; the default (`/root/.microsandbox`) is inaccessible to a non-root uid. libkrun has no uid==0 check.
 
+#### Guest-level hardening
+
+The securityContext above hardens the pod. `spec.securityProfile` and `spec.rlimits` harden the guest, a layer inside the VM that agentd enforces on guest processes and that therefore needs no host privilege. `Restricted` sets `no_new_privs`, drops `CAP_SYS_ADMIN`, and forces `nosuid,nodev` on user mounts for exec sessions; `rlimits` are applied at guest PID 1 so every process inherits them.
 
 #### How secrets work
 
