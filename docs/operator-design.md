@@ -399,10 +399,12 @@ spec:
       nameservers: []              # override resolvers; empty = use host resolv.conf
       queryTimeoutMs: 5000
 
-    # Published ports: expose guest port on the pod IP
+    # Published ports: expose a guest port on the pod IP
     publishedPorts:
-      - containerPort: 8080
-        protocol: TCP              # TCP | UDP (default: TCP)
+      - guestPort: 8080             # required: the port the guest listens on
+        hostPort: 8080              # optional: pod-side port (defaults to guestPort)
+        hostBind: 0.0.0.0           # optional: bind address (defaults to 0.0.0.0)
+        protocol: TCP               # TCP | UDP (default: TCP)
 
     # Maximum concurrent connections from guest (default: 256)
     maxConnections: 256
@@ -615,7 +617,7 @@ graph TB
     cni -->|"masqueraded at node by CNI plugin"| net["Real Network<br/>api.openai.com etc."]
 ```
 
-Outbound connections from the guest pass through the smoltcp poll loop, which classifies each SYN, applies egress policy, intercepts TLS and DNS where configured, and opens a real `TcpStream` from the pod IP to the destination. Inbound traffic has no path to `172.16.0.2` from outside the pod. The only way in is a declared `publishedPort`: `msb` binds a listener on the pod IP and proxies into the guest in userspace. The operator creates a `ClusterIP` Service per sandbox and sets `hostBind` to `0.0.0.0`.
+Outbound connections from the guest pass through the smoltcp poll loop, which classifies each SYN, applies egress policy, intercepts TLS and DNS where configured, and opens a real `TcpStream` from the pod IP to the destination. Inbound traffic has no path to `172.16.0.2` from outside the pod. The only way in is a declared `publishedPort`: `msb` binds a listener on the pod IP (at `hostBind`, default `0.0.0.0`) and proxies into the guest in userspace, and the operator fronts it with a `ClusterIP` Service.
 
 In a pod (one sandbox per pod), the slot is always 0. The operator does no IPAM and needs no coordination with the CNI.
 
@@ -634,12 +636,14 @@ The `spec.network` fields the CRD exposes (all map directly to msb `NetworkConfi
 | `dns.rebindProtection` | bool | true | Block DNS rebinding attacks |
 | `dns.nameservers` | string[] | [] | Override DNS resolvers; empty = host `resolv.conf` |
 | `dns.queryTimeoutMs` | integer | 5000 | DNS query timeout in milliseconds |
-| `publishedPorts[].containerPort` | integer | (none) | Guest port to expose on the pod IP |
+| `publishedPorts[].guestPort` | integer | (required) | Port the guest listens on |
+| `publishedPorts[].hostPort` | integer | `guestPort` | Pod-side port |
+| `publishedPorts[].hostBind` | string | `0.0.0.0` | Bind address on the pod side |
 | `publishedPorts[].protocol` | string | `TCP` | `TCP` or `UDP` |
 | `maxConnections` | integer | 256 | Max concurrent guest TCP connections |
 | `trustHostCas` | bool | false | Copy host trusted CAs into guest for corporate MITM proxies |
 
-`publishedPorts[].hostBind` is set by the operator to `0.0.0.0` automatically and is not user-configurable.
+The per-sandbox `ClusterIP` Service publishes `hostPort` (which defaults to `guestPort`); `hostBind` defaults to `0.0.0.0` but is a normal spec field a user may override.
 
 **Interface overrides (`interface.mac`, `interface.mtu`, `interface.ipv4Address`, `interface.ipv4Pool`) are not exposed.** All are derived from the sandbox slot; manual overrides risk IP conflicts between sandboxes on the same node with no valid use case in a cluster context.
 
@@ -658,7 +662,7 @@ Built-in presets:
 | `publicOnly` (default) | Allow DNS + Public egress; deny everything else |
 | `allowAll` | No restrictions |
 | `denyAll` | Deny all egress and ingress |
-| `nonLocal` | Allow non-RFC-1918 egress; deny Private/Loopback |
+| `nonLocal` | Allow Public and Private (RFC-1918) egress; deny the local groups (Loopback, LinkLocal, Metadata, Host) |
 
 **SNI + DNS double-check.** For allow rules matching a domain, msb checks both the TLS SNI and the DNS cache entry; the destination IP must match the DNS A/AAAA record returned for the domain. This prevents SNI spoofing. Deny rules match SNI alone.
 
@@ -862,7 +866,7 @@ No ingress, no service mesh, no storage classes, no cert-manager dependency.
 
 #### Port publishing
 
-The operator sets `hostBind: 0.0.0.0` automatically for any `publishedPorts` entry and creates a `ClusterIP` Service. The sandbox is reachable within the cluster at `{service-name}.{namespace}.svc.cluster.local:{port}`. External access (LoadBalancer, Ingress) is the user's responsibility; out of scope for V1.
+Each `publishedPorts` entry becomes a port on the per-sandbox `ClusterIP` Service. The sandbox is reachable within the cluster at `{service-name}.{namespace}.svc.cluster.local:{hostPort}` (where `hostPort` defaults to `guestPort`). External access (LoadBalancer, Ingress) is the user's responsibility; out of scope for V1.
 
 ---
 
