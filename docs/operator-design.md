@@ -98,7 +98,7 @@ The operator has three components, each owning a distinct concern.
 
 The **controller** watches CRDs cluster-wide, creates pods, and syncs status. It is stateless and restartable; all durable state lives in the Kubernetes API.
 
-The **daemon** runs on every node. `msb` must exec on the same machine as `/dev/kvm`; the process that starts it, tracks the PID, and reports its exit must be co-located. The daemon is the bridge between a node-local OS process and the Kubernetes API.
+The **daemon** runs on every node. `msb` must exec on the same machine as `/dev/kvm`; the `msb-runtime` container boots it there, and the daemon — co-located on the node — tracks the PID and reports its exit. The daemon is the bridge between a node-local OS process and the Kubernetes API.
 
 Secret values cannot be stored in the CRD spec or passed as env vars. The controller mounts each referenced Secret as a read-only volume; the kubelet reads it, so the pod needs no Secret RBAC, and the runtime resolves the values in-process before `msb` starts.
 
@@ -185,7 +185,7 @@ sequenceDiagram
     participant Ctrl as msb-controller
 
     Runtime->>Runtime: guest exits, msb process exits (code 0)
-    Daemon->>Daemon: waitpid detects msb child exit
+    Daemon->>Daemon: kill(pid, 0) poll detects msb process exit
     Daemon->>Daemon: read termination reason from node-local state
     Daemon->>API: annotate Pod: microsandbox.io/termination-reason=Completed
     API-->>Ctrl: Pod phase → Succeeded
@@ -199,7 +199,7 @@ sequenceDiagram
 
 ### Daemon Crash and Re-adoption
 
-The daemon starts sandboxes in detached mode (`SpawnMode::Detached`, equivalent to `msb start`). This means:
+The `msb-runtime` container boots each sandbox in detached mode (`SpawnMode::Detached`, equivalent to `msb start`); the daemon only tracks it. This means:
 
 - No parent watchdog pipe; the sandbox is not coupled to the daemon's lifetime
 - The sandbox calls `setsid()` and becomes a new session leader
@@ -248,7 +248,7 @@ sequenceDiagram
 |-----------|------|------|
 | `msb-controller` | `Deployment` (leader election) | Watches `Sandbox` CRDs cluster-wide; creates/deletes sandbox pods; syncs CRD status |
 | `msb-daemon` | `DaemonSet` | Per-node; watches sandbox pods; tracks PID via SQLite; re-adopts live sandboxes on restart; annotates pods with termination reason |
-| `msb-runtime` | Container (per pod) | Runs `msb` in detached mode (started by the daemon); hosts the guest VM and smoltcp proxy |
+| `msb-runtime` | Container (per pod) | Boots `msb` in detached mode via the SDK; hosts the guest VM and smoltcp proxy |
 | `msb-bridge` | Sidecar container (per pod) | WebSocket → `agent.sock` bridge; port configurable, default 7000; injected automatically by the controller; SDK clients connect here |
 | `msb-console-log` | Container (per pod, opt-in) | Added when `logging.guestConsole` is set; tails guest stdout/stderr to its own stdout for `kubectl logs` |
 | `msb-gateway` | `Deployment` (opt-in) | Speaks msb's cloud API so the unmodified SDK drives the cluster; lifecycle REST and exec WebSocket; off by default |
@@ -319,7 +319,7 @@ DaemonSet on every node.
 **Responsibilities:**
 - Watch Pods on its own node that carry label `microsandbox.io/sandbox: "true"`
 - When a sandbox Pod becomes Running: the `msb-runtime` container has booted `msb` in detached mode via the **msb Rust SDK** (config built in-process, off argv). Detached mode: no watchdog pipe, sandbox calls `setsid()`, survives daemon restarts as an independent OS process. Gap: `ProcessHandle::from_pid()` does not exist in the SDK today, so re-adoption uses `kill(pid, 0)` polling as an interim (see pidfd_open TODO below).
-- On graceful shutdown: send SIGTERM to each live msb child process. Detached mode creates no watchdog pipe, so there is nothing to disarm; SIGTERM is the shutdown signal.
+- On graceful shutdown: nothing to do. The msb processes are the runtime's, not the daemon's children, and run detached; they keep running while the daemon drains its annotation writes and exits.
 - Track the child PID in SQLite; on exit, read termination reason, annotate the Pod
 - On startup: query SQLite for sandboxes marked `Running`; probe each PID with `kill(pid, 0)`; re-adopt live ones by reconnecting to their agent socket; mark dead ones Crashed and annotate their pods
 - Run the device plugin gRPC server on `/var/lib/kubelet/device-plugins/microsandbox-kvm.sock`
@@ -967,7 +967,7 @@ _Mitigation:_ the volume holds only the referenced Secret keys and is never writ
 
 **Decision: exec-based (current).**
 
-The daemon uses the msb Rust SDK to spawn `msb` in detached mode, tracks the PID via SQLite, and reads SQLite for status. No changes to `msb` internals required.
+The `msb-runtime` container uses the msb Rust SDK to boot `msb` in detached mode; the daemon tracks the PID via SQLite and reads SQLite for status. No changes to `msb` internals required.
 
 **Rejected: Unix socket management API.** Adding a socket API to `msb` (analogous to [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor)'s socket that Virtink uses) would allow the daemon to call `VmInfo()`-equivalent RPCs instead of scraping SQLite. More robust and richer lifecycle events, but requires invasive changes to `msb`. Deferred until exec-based limitations become concrete.
 
@@ -1013,7 +1013,7 @@ The controller injects `msb-bridge` into every sandbox pod unconditionally. For 
 
 **4. Management socket and lifecycle operations**
 
-The daemon currently manages `msb` by spawning a subprocess and scraping SQLite. A management socket on `msb`, analogous to Cloud Hypervisor's `/run/cloud-hypervisor.sock` used by Virtink, would replace polling with typed RPCs and unlock operations that are not cleanly expressible today:
+The daemon currently observes `msb` by scraping SQLite and polling the PID. A management socket on `msb`, analogous to Cloud Hypervisor's `/run/cloud-hypervisor.sock` used by Virtink, would replace polling with typed RPCs and unlock operations that are not cleanly expressible today:
 
 | Operation | Current state | With management socket |
 |-----------|--------------|------------------------|
