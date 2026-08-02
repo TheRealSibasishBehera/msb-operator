@@ -738,7 +738,6 @@ spec:
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
-    supplementalGroups: [<kvm-gid>]  # node-dependent: stat -c %g /dev/kvm
   containers:
   - name: msb-runtime
     env:
@@ -758,10 +757,9 @@ spec:
 
 `NET_ADMIN` is in the `baseline` Pod Security Standard allowlist. Sandbox namespaces need `enforce: baseline`; no per-capability exemption required. Clusters enforcing `restricted` cluster-wide need a namespace-level override.
 
-**Non-root requirements.** The pod needs two things beyond the capability grant to run non-root:
+**Non-root requirements.** To open `/dev/kvm`, a non-root process would normally need to be in the node's `kvm` group, whose GID is node-dependent and not standardised. Rather than plumb that GID through the pod (`supplementalGroups`), the daemon relaxes `/dev/kvm` to world-rw at startup, so any uid can open it and the sandbox pod needs no `kvm` group membership.
 
-- `supplementalGroups: [<kvm-gid>]`: `/dev/kvm` is `crw-rw---- root:kvm`. The device plugin handles the kernel cgroup allowlist but not Unix DAC; the process must be in the kvm group to open the device. The kvm GID is node-dependent and not standardised; Ubuntu 24.04 assigns it dynamically. The operator or Helm chart must accept it as a configuration value, read it from a node label, or require a udev rule on the node that pins it to a known value (KubeVirt's approach).
-- `MSB_HOME` pointing to a writable path; the default (`/root/.microsandbox`) is inaccessible to a non-root uid. libkrun has no uid==0 check.
+Beyond that, the pod needs `MSB_HOME` pointing to a writable path; the default (`/root/.microsandbox`) is inaccessible to a non-root uid, and libkrun has no uid==0 check.
 
 #### Guest-level hardening
 
