@@ -289,7 +289,10 @@ flowchart TD
     E --> K([done])
     C -->|Yes| R[requeue 5s]
 
-    B -->|Running| F{pod.status?}
+    B -->|Running| S{desiredState?}
+    S -->|Stopped| SD[delete pod<br/>patch status.phase = Stopped]
+    SD --> K
+    S -->|Running| F{pod.status?}
     F -->|Still running| R
     F -->|Succeeded or Failed| G[read terminationReason<br/>from pod annotation]
     G --> G2[patch Sandbox.status<br/>+ terminationReason + exitCode]
@@ -307,6 +310,10 @@ flowchart TD
 
     L -->|Yes| J[delete Sandbox CRD<br/>pod already gone — ownerRef cascade is safety net only]
     L -->|No| K
+
+    B -->|Stopped| SS{desiredState?}
+    SS -->|Running| D
+    SS -->|Stopped| K
 
     B -->|Succeeded / Failed terminal| L
     B -->|Failed + RerunOnFailure| RETRY
@@ -405,6 +412,10 @@ spec:
   # OCI image to use as the guest rootfs
   image: python:3.12
 
+  # Running (default) or Stopped. Mutable — set Stopped to delete the pod while
+  # keeping the Sandbox; set Running again to boot a fresh one.
+  desiredState: Running
+
   # VM resources. cpus/memory are mutable — editing them resizes a running guest.
   cpus: 1
   memory: 512   # integer MiB
@@ -481,7 +492,7 @@ spec:
       size: 10Gi       # sparse ext4, managed by msb-daemon on the node
 
 status:
-  phase: Running             # Pending | Running | Succeeded | Failed — written by controller
+  phase: Running             # Pending | Running | Stopped | Succeeded | Failed — written by controller
   podName: sandbox-my-sandbox-a1b2c  # written by controller at pod creation
   nodeName: node-1           # written by controller when pod is scheduled; read back on restart for node pinning
   startedAt: "2026-06-29T10:00:00Z"  # written by controller when phase transitions to Running
@@ -500,6 +511,10 @@ status:
       status: "False"
       reason: Resized
 ```
+
+#### desiredState
+
+`desiredState: Stopped` deletes the pod but keeps the Sandbox object, and the controller records `phase: Stopped`. `Running` again boots a new pod. Since a sandbox runs on an emptyDir, this is a reboot, not a suspend/resume: the stopped sandbox holds no guest state, and start is a cold boot. The per-sandbox Service is retained across stop/start so the sandbox keeps a stable address. Stopping does not count as an exit — it never triggers `runPolicy`, `restartCount`, or the `ephemeral` delete.
 
 #### runPolicy
 
