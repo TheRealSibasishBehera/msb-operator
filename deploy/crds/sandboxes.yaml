@@ -96,7 +96,7 @@ spec:
                   rule: self == oldSelf
               ephemeral:
                 default: false
-                description: Whether to delete the Sandbox CRD after the sandbox exits. This field is immutable.
+                description: Whether to delete the Sandbox object after the sandbox exits. This field is immutable.
                 type: boolean
                 x-kubernetes-validations:
                 - message: spec.ephemeral is immutable after creation

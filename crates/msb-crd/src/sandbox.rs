@@ -85,7 +85,7 @@ pub struct SandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
 
-    /// Whether to delete the Sandbox CRD after the sandbox exits. This field is immutable.
+    /// Whether to delete the Sandbox object after the sandbox exits. This field is immutable.
     #[serde(default)]
     pub ephemeral: bool,
 
