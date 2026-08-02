@@ -85,7 +85,8 @@ Running `msb` inside Kubernetes pods is non-trivial: it requires KVM device acce
 
 - **Live migration**: sandboxes are ephemeral; kill and reschedule
 - **General-purpose PVC integration**: no StorageClass provisioning, no shared network storage (NFS/Ceph), no automatic data migration across nodes. Named volumes are node-local in V1 and stay outside Kubernetes' storage jurisdiction by design.
-- **Hotplug**: `msb` has no hotplug support for CPU, memory, or devices; spec is sealed at boot
+- **Device hotplug**: no live attach/detach of block or network devices after boot
+- **Resize beyond the boot envelope**: `cpus`/`memory` resize live only up to the `maxCpus`/`maxMemory` reserved at boot; growing past that ceiling needs a restart
 - **Sandbox-to-sandbox networking**: same isolation model as local `msb`
 - **macOS nodes**: Kubernetes does not support macOS as a node OS
 
@@ -272,7 +273,7 @@ Deployment with leader election enabled. Replica count is operator-configured (t
 - On Pod Running: patch `Sandbox.status.phase = Running`
 - On Pod completion: read termination reason from Pod annotation, patch `Sandbox.status`. Then explicitly delete the pod (not via GC: the controller deletes it so stale pods don't accumulate). The controller must read the annotation **before** deleting the pod. If `runPolicy: RerunOnFailure` and the exit was unclean, requeue to create a new pod (cold boot). On terminal state (clean exit): if `ephemeral: true`, delete the CRD object (which cascades pod GC via owner reference).
 - On delete: owner reference cascades pod deletion automatically; daemon detects pod deletion and kills the `msb` child
-- On update: spec changes after the sandbox is Running are rejected by CEL `x-kubernetes-validations` rules in the CRD (`self == oldSelf` on `spec`); status updates are allowed
+- On update: most spec fields are immutable after creation, enforced by per-field CEL `x-kubernetes-validations` rules in the CRD (`self == oldSelf` on each sealed field). The mutable exceptions are `desiredState` (start/stop) and `cpus`/`memory` (live resize, bounded by `maxCpus`/`maxMemory`); a change to a mutable field is reconciled, a change to a sealed one is rejected by the API server before it reaches the controller. Status updates are always allowed
 
 **The controller is stateless.** All state is in the Kubernetes API. Everything it needs arrives via daemon-written pod annotations. A crash and restart is a no-op.
 
@@ -404,9 +405,13 @@ spec:
   # OCI image to use as the guest rootfs
   image: python:3.12
 
-  # VM resources
+  # VM resources. cpus/memory are mutable — editing them resizes a running guest.
   cpus: 1
   memory: 512   # integer MiB
+
+  # Boot-reserved resize ceiling (immutable; default = effective, i.e. no headroom).
+  maxCpus: 2
+  maxMemory: 1024
 
   # Command to run inside the guest (optional; defaults to image entrypoint)
   cmd: ["python", "script.py"]
@@ -488,6 +493,12 @@ status:
   #   unclean: OOMKilled | Evicted | NodeLost
   terminationReason: null    # written by controller from pod annotation (daemon sets the annotation)
   exitCode: null             # written by controller from pod annotation
+  appliedCpus: 1             # cpus/memory last applied to the guest; lag spec while a resize is pending
+  appliedMemory: 512
+  conditions:                # RestartRequired when a resize can't be applied live
+    - type: RestartRequired
+      status: "False"
+      reason: Resized
 ```
 
 #### runPolicy
@@ -513,7 +524,7 @@ Each retry is a full cold boot: a new pod, a new msb process, a fresh VM. The op
 
 Retry requeue uses an explicit `Action::requeue(duration)`. kube-rs automatic exponential backoff only applies to reconcile errors, not success-path requeues. The retry interval must be managed explicitly in the controller.
 
-**Immutability:** `spec` is sealed at creation time. `x-kubernetes-validations` CEL rules (`self == oldSelf`) enforce this in the CRD itself; the API server rejects spec updates before they reach the controller. `status` is managed exclusively by the controller and daemon.
+**Immutability:** the spec is immutable *per field*, not as a whole. Each sealed field carries its own `x-kubernetes-validations` CEL rule (`self == oldSelf`), injected at CRD-generation time from an allowlist of the fields that are *not* sealed. The mutable fields are `desiredState`, `cpus`, and `memory`; every other field is rejected by the API server on update, before the change reaches the controller. `cpus`/`memory` are additionally bounded by `self.cpus <= maxCpus` / `self.memory <= maxMemory` so a resize can never exceed the boot envelope. `status` is managed exclusively by the controller and daemon. Each sealed field's description ends with the literal "This field is immutable." so `kubectl explain` states it plainly.
 
 **Controller-injected containers:** The controller automatically adds `msb-bridge` as a second container in every sandbox pod and creates a `ClusterIP` Service for it. Users do not declare the bridge in the `Sandbox` spec; it is always present.
 
@@ -892,6 +903,8 @@ flowchart TD
 ```
 
 On each incoming WebSocket connection the bridge dials `agent.sock`, reads the 8-byte handshake prologue (`id_min u32 BE + id_max u32 BE`) and the `core.ready` frame, sends them together as the first WebSocket message, then enters bidirectional byte forwarding. If the dial fails (sandbox restarting), it retries with backoff; the socket path is deterministic from the sandbox name so no re-discovery is needed.
+
+The bridge also exposes `POST /control` on its health port: it relays one JSON request to the sandbox's control socket (`<sandbox>.control.sock`) and returns the reply. The controller uses it to apply a live cpu/memory resize, reaching the socket through the per-sandbox Service instead of exec'ing into the pod.
 
 
 ### Deployment
