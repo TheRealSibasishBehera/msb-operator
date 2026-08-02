@@ -272,7 +272,7 @@ flowchart TD
 DaemonSet on every node.
 
 **Responsibilities:**
-- Run the device plugin gRPC server on `/var/lib/kubelet/device-plugins/microsandbox-kvm.sock`, advertising `/dev/kvm`, and relax the device to world-rw so non-root sandbox pods can open it
+- Run the device plugin gRPC server on `/var/lib/kubelet/device-plugins/msb-kvm.sock`, advertising `/dev/kvm`, and relax the device to world-rw so non-root sandbox pods can open it
 - Watch sandbox Pods scheduled on its own node (`spec.nodeName` is field-selectable) and, for each, pull the referenced image and convert it into the node-local cache, writing a ready marker the runtime waits on before boot
 - Watch `/dev/kvm` health and reflect it into the device plugin's advertised capacity
 
@@ -288,20 +288,20 @@ Three non-obvious decisions:
 
 **Server before Register.** The plugin starts its gRPC server on its own socket first, then calls `Register` with kubelet. kubelet immediately dials back on `ListAndWatch`; if the server isn't up yet, that dial fails and the plugin appears dead.
 
-**inotify on the plugin socket for kubelet restarts.** When kubelet restarts it deletes all plugin sockets. The plugin watches its own socket path; on removal it tears down, sleeps 5 seconds, and re-registers from scratch. Without this the plugin is permanently orphaned after any kubelet restart.
+**Re-register on kubelet restart.** A kubelet restart deletes all plugin sockets. The plugin watches the device-plugin directory for the kubelet's own socket (`kubelet.sock`) being re-created, and on that signal tears down, sleeps 5 seconds, and re-registers from scratch. Without this the plugin is permanently orphaned after any kubelet restart.
 
 **Rust bindings.** No maintained crate exists. Vendor `v1beta1` from `github.com/kubernetes/kubelet/pkg/apis/deviceplugin/v1beta1/api.proto` and generate with `tonic-build`. `v1beta1` is the only version required by any production kubelet.
 
 **Health → stream bridge.** `tokio::sync::watch`: the inotify watcher publishes health state; every open `ListAndWatch` stream clones the receiver and wakes on change.
 
-**`Allocate` response.** Returns `DeviceSpec { host_path: "/dev/kvm", permissions: "rw" }`. No env vars or mounts.
+**`Allocate` response.** Returns the `/dev/kvm` device (`host_path: "/dev/kvm", permissions: "rw"`) and one read-only mount: the node image cache at `/msb/cache`. No env vars. The cache mount is how a sandbox pod — which runs restricted and cannot mount hostPath itself — receives the node-local cache the daemon populated.
 
 ```mermaid
 sequenceDiagram
     participant Kubelet as kubelet
     participant Plugin as device plugin (in msb-daemon)
 
-    Plugin->>Plugin: start gRPC server on microsandbox-kvm.sock
+    Plugin->>Plugin: start gRPC server on msb-kvm.sock
     Plugin->>Kubelet: Register(resourceName="devices.microsandbox.dev/kvm")
     Kubelet->>Plugin: ListAndWatch()
     Plugin-->>Kubelet: [kvm-0…kvm-999: Healthy]
@@ -316,7 +316,7 @@ sequenceDiagram
     end
 
     Kubelet->>Plugin: Allocate([{deviceID: "kvm-0"}])
-    Plugin-->>Kubelet: [{hostPath: "/dev/kvm", permissions: "rw"}]
+    Plugin-->>Kubelet: device /dev/kvm (rw) + mount /msb/cache (ro)
 ```
 
 ### CRD Specification
