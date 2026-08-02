@@ -11,7 +11,7 @@
   - [System Overview](#system-overview)
   - [Sandbox Creation](#sandbox-creation)
   - [Sandbox Termination](#sandbox-termination)
-  - [Daemon Crash and Re-adoption](#daemon-crash-and-re-adoption)
+  - [Daemon restart](#daemon-restart)
   - [Component Map](#component-map)
   - [Component Design](#component-design)
     - [msb-controller](#msb-controller)
@@ -98,11 +98,11 @@ The operator has three components, each owning a distinct concern.
 
 The **controller** watches CRDs cluster-wide, creates pods, and syncs status. It is stateless and restartable; all durable state lives in the Kubernetes API.
 
-The **daemon** runs on every node. `msb` must exec on the same machine as `/dev/kvm`; the `msb-runtime` container boots it there, and the daemon — co-located on the node — tracks the PID and reports its exit. The daemon is the bridge between a node-local OS process and the Kubernetes API.
+The **daemon** runs on every node. It advertises `/dev/kvm` to the kubelet through the device plugin, watches that device's health, and — as sandbox pods schedule onto the node — pulls and converts their images into the node-local cache the guest boots from.
 
 Secret values cannot be stored in the CRD spec or passed as env vars. The controller mounts each referenced Secret as a read-only volume; the kubelet reads it, so the pod needs no Secret RBAC, and the runtime resolves the values in-process before `msb` starts.
 
-One sandbox = one pod: two containers, `msb-runtime` and the `msb-bridge` sidecar. `msb-runtime` launches `msb` in detached mode (`msb` and `libkrunfw` are baked into its image); the daemon watches the pod, reads the PID from SQLite, and surfaces termination state back to the controller via pod annotations. The controller is the sole writer of CRD status. Secrets never appear in the pod spec, env vars, or logs.
+One sandbox = one pod: two containers, `msb-runtime` and the `msb-bridge` sidecar. `msb-runtime` launches `msb` in detached mode (`msb` and `libkrunfw` are baked into its image). The controller observes the pod through the Kubernetes API — including the runtime container's exit — and is the sole writer of CRD status. Secrets never appear in the pod spec, env vars, or logs.
 
 ---
 
@@ -119,7 +119,7 @@ graph TB
         ctrl["msb-controller<br/>Deployment · leader election"]
 
         subgraph nodeA["Node A — KVM capable"]
-            daemon["msb-daemon DaemonSet<br/>── device plugin (/dev/kvm)<br/>── msb start (detached) · PID tracking · re-adopt on restart"]
+            daemon["msb-daemon DaemonSet<br/>── device plugin (/dev/kvm)<br/>── image pull + convert to node cache"]
             kubelet["kubelet"]
 
             subgraph pod["Sandbox Pod"]
@@ -140,7 +140,7 @@ graph TB
     api <-->|"watch CRDs / patch status"| ctrl
     ctrl -->|"create Pod"| api
     api -->|"schedule to KVM node"| nodeA
-    daemon -->|"patch pod annotations"| api
+    daemon -->|"watch sandbox pods on this node"| api
     kubelet <-->|"ListAndWatch / Allocate"| daemon
     runtime -->|"agent.sock (emptyDir)"| bridge
 ```
@@ -162,13 +162,13 @@ sequenceDiagram
     Ctrl->>API: patch Sandbox.status.phase = Pending
     API->>API: schedule Pod to KVM-capable node
 
+    API-->>Daemon: watch event — sandbox Pod scheduled here
+    Daemon->>Daemon: pull + convert the image into the node cache
+
     Note over Runtime: msb-runtime container starts
     Runtime->>Runtime: read Secret volumes, resolve in-process (no resolved-config file written)
-    Runtime->>Runtime: build boot config via the SDK, exec msb start
+    Runtime->>Runtime: build boot config via the SDK, exec msb start (from the node cache)
     Runtime->>Runtime: libkrun boots guest VM, smoltcp proxy starts
-
-    API-->>Daemon: watch event — Pod Running on this node
-    Daemon->>Daemon: record PID from SQLite in node-local state
 
     API-->>Ctrl: Pod phase → Running
     Ctrl->>API: patch Sandbox.status.phase = Running
@@ -180,74 +180,29 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Runtime as msb-runtime
-    participant Daemon as msb-daemon
     participant API as k8s API Server
     participant Ctrl as msb-controller
 
     Runtime->>Runtime: guest exits, msb process exits (code 0)
-    Daemon->>Daemon: kill(pid, 0) poll detects msb process exit
-    Daemon->>Daemon: read termination reason from node-local state
-    Daemon->>API: annotate Pod: microsandbox.io/termination-reason=Completed
-    API-->>Ctrl: Pod phase → Succeeded
-    Ctrl->>Ctrl: read termination reason from Pod annotation
+    Runtime->>Runtime: msb-runtime container terminates with that exit code
+    API-->>Ctrl: watch event — runtime container Terminated
+    Ctrl->>Ctrl: derive terminationReason from the container's terminated state
     Ctrl->>API: patch Sandbox.status: phase=Succeeded, terminationReason=Completed
-    Note over Ctrl: status patch BEFORE CRD deletion — annotation is lost once pod is GC'd
     alt ephemeral: true
         Ctrl->>API: delete Sandbox CRD (owner ref cascades pod deletion)
     end
 ```
 
-### Daemon Crash and Re-adoption
+### Daemon restart
 
-The `msb-runtime` container boots each sandbox in detached mode (`SpawnMode::Detached`, equivalent to `msb start`); the daemon only tracks it. This means:
-
-- No parent watchdog pipe; the sandbox is not coupled to the daemon's lifetime
-- The sandbox calls `setsid()` and becomes a new session leader
-- A daemon crash leaves all sandboxes running as independent OS processes
-
-On restart, the daemon re-adopts live sandboxes from the SQLite DB:
-
-```mermaid
-sequenceDiagram
-    participant DB as SQLite (node-local)
-    participant Daemon as msb-daemon
-    participant API as k8s API Server
-
-    Note over Daemon: daemon crashes
-    Note over Daemon: msb processes keep running (detached, independent)
-
-    Note over Daemon: daemon restarts
-
-    Daemon->>DB: query sandboxes with status=Running
-    DB-->>Daemon: [(pid=1234, sandbox_id=abc), ...]
-
-    loop for each entry
-        Daemon->>Daemon: kill(pid, 0)
-        alt process alive
-            Daemon->>Daemon: re-adopt — begin kill(pid,0) poll loop, reconnect to agent.sock
-            Note over Daemon: race window: process may exit between check and poll start
-        else process gone
-            Daemon->>DB: mark Crashed
-            Daemon->>API: annotate Pod: termination-reason=Failed
-            Note over Daemon: cannot distinguish "crashed while daemon was down" from "crashed normally"
-        end
-    end
-```
-
-**Re-adoption mechanism.** The agent socket path is deterministic from the sandbox name (`sha256(name)[0:32].sock`), so the daemon can reconnect without any handshake. Liveness is tracked via `kill(pid, 0)` polling rather than `waitpid`; the SDK's `ProcessHandle` today wraps `tokio::process::Child` which requires spawn-time ownership. A `ProcessHandle::from_pid()` constructor that re-attaches proper `waitpid`-based exit detection is the missing piece; until that exists, the daemon polls.
-
-**TOCTOU gap.** `kill(pid, 0)` and the first poll tick are not atomic. A sandbox that exits in that window appears live to the re-adoption sweep but dead on the first poll; the controller sees a brief period where it believes the sandbox is Running when it is not. With `pidfd_open`-based `ProcessHandle::from_pid()` this race disappears: the fd is acquired atomically at re-adoption time and delivers an event-driven exit notification.
-
-**Termination reason on missed crash.** If a sandbox dies while the daemon is down, the daemon has no record of the exit code or cause. It marks the pod `Failed`, the same value used for any unclean msb exit. There is no way to distinguish "crashed while daemon was down" from "crashed normally and daemon wrote the annotation before it died." The `terminationReason` in these cases reflects the observed state, not the inferred cause.
-
-**Graceful daemon restart.** On `SIGTERM`, the daemon does not need to do anything special; sandboxes keep running. It can drain in-flight annotation writes and exit cleanly. No watchdog disarm needed because detached mode never created a watchdog pipe.
+The daemon holds no per-sandbox state. `msb` runs inside the `msb-runtime` container, supervised by the kubelet like any container process — the daemon neither spawns nor tracks it. So a daemon crash is a non-event for running sandboxes: they keep running, and on restart the daemon simply resumes the device plugin and the image-pull watch. Sandbox liveness and exit are observed by the kubelet (container status) and the controller (which reads it), not by the daemon.
 
 ### Component Map
 
 | Component | Kind | Role |
 |-----------|------|------|
 | `msb-controller` | `Deployment` (leader election) | Watches `Sandbox` CRDs cluster-wide; creates/deletes sandbox pods; syncs CRD status |
-| `msb-daemon` | `DaemonSet` | Per-node; watches sandbox pods; tracks PID via SQLite; re-adopts live sandboxes on restart; annotates pods with termination reason |
+| `msb-daemon` | `DaemonSet` | Per-node; device plugin for `/dev/kvm`; pulls and converts sandbox images into the node cache |
 | `msb-runtime` | Container (per pod) | Boots `msb` in detached mode via the SDK; hosts the guest VM and smoltcp proxy |
 | `msb-bridge` | Sidecar container (per pod) | WebSocket → `agent.sock` bridge; port configurable, default 7000; injected automatically by the controller; SDK clients connect here |
 | `msb-console-log` | Container (per pod, opt-in) | Added when `logging.guestConsole` is set; tails guest stdout/stderr to its own stdout for `kubectl logs` |
@@ -264,11 +219,11 @@ Deployment with leader election enabled. Replica count is operator-configured (t
 - Watch `Sandbox` CRDs via a `kube::runtime::Controller` reconciler
 - On create: validate spec, create the sandbox Pod with `devices.microsandbox.io/kvm: 1` resource request; set the Sandbox CRD as an `ownerReference` on the Pod (pod is garbage collected automatically when the CRD is deleted)
 - On Pod Running: patch `Sandbox.status.phase = Running`
-- On Pod completion: read termination reason from Pod annotation, patch `Sandbox.status`. Then explicitly delete the pod (not via GC: the controller deletes it so stale pods don't accumulate). The controller must read the annotation **before** deleting the pod. If `runPolicy: RerunOnFailure` and the exit was unclean, requeue to create a new pod (cold boot). On terminal state (clean exit): if `ephemeral: true`, delete the CRD object (which cascades pod GC via owner reference).
-- On delete: owner reference cascades pod deletion automatically; daemon detects pod deletion and kills the `msb` child
+- On runtime-container exit: derive the termination reason from the container's terminated state, patch `Sandbox.status`, then explicitly delete the pod (not via GC: the controller deletes it so stale pods don't accumulate). If `runPolicy: RerunOnFailure` and the exit was unclean, requeue to create a new pod (cold boot). On a clean exit with `ephemeral: true`, delete the CRD object (which cascades pod GC via owner reference).
+- On delete: the owner reference cascades pod deletion; the kubelet stops the containers, which terminates `msb`
 - On update: most spec fields are immutable after creation, enforced by per-field CEL `x-kubernetes-validations` rules in the CRD (`self == oldSelf` on each sealed field). The mutable exceptions are `desiredState` (start/stop) and `cpus`/`memory` (live resize, bounded by `maxCpus`/`maxMemory`); a change to a mutable field is reconciled, a change to a sealed one is rejected by the API server before it reaches the controller. Status updates are always allowed
 
-**The controller is stateless.** All state is in the Kubernetes API. Everything it needs arrives via daemon-written pod annotations. A crash and restart is a no-op.
+**The controller is stateless.** All state is in the Kubernetes API; everything it needs it reads from there, chiefly the sandbox pod's status. A crash and restart is a no-op.
 
 **Reconcile loop:**
 
@@ -317,21 +272,11 @@ flowchart TD
 DaemonSet on every node.
 
 **Responsibilities:**
-- Watch Pods on its own node that carry label `microsandbox.io/sandbox: "true"`
-- When a sandbox Pod becomes Running: the `msb-runtime` container has booted `msb` in detached mode via the **msb Rust SDK** (config built in-process, off argv). Detached mode: no watchdog pipe, sandbox calls `setsid()`, survives daemon restarts as an independent OS process. Gap: `ProcessHandle::from_pid()` does not exist in the SDK today, so re-adoption uses `kill(pid, 0)` polling as an interim (see pidfd_open TODO below).
-- On graceful shutdown: nothing to do. The msb processes are the runtime's, not the daemon's children, and run detached; they keep running while the daemon drains its annotation writes and exits.
-- Track the child PID in SQLite; on exit, read termination reason, annotate the Pod
-- On startup: query SQLite for sandboxes marked `Running`; probe each PID with `kill(pid, 0)`; re-adopt live ones by reconnecting to their agent socket; mark dead ones Crashed and annotate their pods
-- Run the device plugin gRPC server on `/var/lib/kubelet/device-plugins/microsandbox-kvm.sock`
-- Communicate with the controller **exclusively via CRD status and Pod annotations**; no direct RPC
+- Run the device plugin gRPC server on `/var/lib/kubelet/device-plugins/microsandbox-kvm.sock`, advertising `/dev/kvm`, and relax the device to world-rw so non-root sandbox pods can open it
+- Watch sandbox Pods scheduled on its own node (`spec.nodeName` is field-selectable) and, for each, pull the referenced image and convert it into the node-local cache, writing a ready marker the runtime waits on before boot
+- Watch `/dev/kvm` health and reflect it into the device plugin's advertised capacity
 
-Liveness check:
-
-```rust
-fn process_exists(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-```
+The daemon does not run or track the `msb` process — that lives in the `msb-runtime` container under the kubelet — so it writes no Pod annotations and keeps no per-sandbox state.
 
 #### Device Plugin
 
@@ -487,13 +432,11 @@ status:
   nodeName: node-1           # where the pod was scheduled (a Node print column)
   startedAt: "2026-06-29T10:00:00Z"  # written by controller when phase transitions to Running
   terminatedAt: null         # written by controller when phase transitions to Succeeded/Failed
-  # Source: daemon annotation (msb native)
-  #   clean:   Completed | MaxDurationExceeded | IdleTimeout | ShutdownRequested
-  #   unclean: Failed
-  # Source: operator-inferred from Pod/Node state (not from msb)
-  #   unclean: OOMKilled | Evicted | NodeLost
-  terminationReason: null    # written by controller from pod annotation (daemon sets the annotation)
-  exitCode: null             # written by controller from pod annotation
+  # Derived by the controller from the runtime container's terminated state:
+  #   clean:   Completed
+  #   unclean: Failed | OOMKilled | Evicted | NodeLost
+  terminationReason: null    # controller, from the runtime container's exit
+  exitCode: null             # controller, the runtime container's exit code
   restartCount: 0            # pod recreations under runPolicy: RerunOnFailure; drives the requeue backoff
   exposedPorts:              # ports reflected onto the Service, so kubectl describe shows guest listeners
     - name: port-8080
@@ -520,13 +463,10 @@ msb has no native restart support. Every sandbox exits and the process terminate
 | `Once` (default) | Run once. Clean or unclean exit: done. No retry. |
 | `RerunOnFailure` | Run. Clean exit: done. Unclean exit: cold-boot a new pod. |
 
-**Clean vs unclean** is determined by `terminationReason`. The value comes from two sources:
+**Clean vs unclean** is determined by `terminationReason`, which the controller derives from the runtime container's terminated state (exit code and pod-level reason):
 
-- **msb native** (daemon writes pod annotation): `Completed`, `MaxDurationExceeded`, `IdleTimeout`, `ShutdownRequested` (clean); `Failed` (unclean)
-- **Operator-inferred** (controller reads Pod/Node state, msb never sees these): `OOMKilled` (kubelet OOM kill), `Evicted` (pod eviction), `NodeLost` (node NotReady timeout)
-
-Clean: `Completed`, `MaxDurationExceeded`, `IdleTimeout`, `ShutdownRequested`
-Unclean: `Failed`, `OOMKilled`, `Evicted`, `NodeLost`
+- `Completed` (exit 0) is clean.
+- `Failed` (non-zero exit), `OOMKilled`, `Evicted`, and `NodeLost` (node NotReady timeout) are unclean.
 
 Each retry is a full cold boot: a new pod, a new msb process, a fresh VM. The operator never restarts the same pod. Pod-level failure (eviction) and VM-process failure (non-zero exit) are treated the same. Both are unclean, both trigger a retry under `RerunOnFailure`.
 
@@ -615,9 +555,8 @@ The controller and daemon never share a private channel. The Kubernetes API is t
 | Data | Kubernetes API | Node-local | Notes |
 |------|---------------|------------|-------|
 | Sandbox spec (image, resources, policy) | Yes, source of truth | Yes, working copy read by the runtime | Kubernetes API wins on conflict |
-| Sandbox phase / status | Yes | Yes | Daemon observes node; controller writes to Kubernetes API |
-| Running PID | No | Yes | Only meaningful on the node; controller never reads it |
-| Termination reason | Yes | Yes | Daemon observes exit, annotates Pod; controller copies to CRD status |
+| Sandbox phase / status | Yes | — | Controller derives it from the pod's status and writes to the Kubernetes API |
+| Termination reason | Yes | — | Controller derives it from the runtime container's terminated state |
 | OCI image layer cache | No | Yes | Node-local; Kubernetes API is the wrong place |
 | Secret values | Never | On the kubelet's Secret mount | Read-only volume, like any pod's `secretKeyRef`; the runtime resolves it in-process |
 
@@ -625,17 +564,13 @@ The controller and daemon never share a private channel. The Kubernetes API is t
 
 | Failure | What dies | What survives | Operator response |
 |---------|-----------|---------------|-------------------|
-| `msb` process crashes | Guest VM, in-flight I/O | Node-local state, image cache on disk | Daemon detects child PID exit, annotates Pod Failed; controller patches CRD; if `ephemeral`, deletes CRD; if `runPolicy: RerunOnFailure`, creates new Pod |
-| Pod OOMKilled by kubelet | Same | Same | k8s reports Pod Failed; controller handles identically |
-| `msb-daemon` crashes mid-run | Nothing; `msb` processes keep running (detached, independent) | SQLite DB, running sandboxes | Daemon restarts, queries DB for `status=Running`, probes each PID, re-adopts live ones, marks any that died while daemon was down as Failed (terminationReason=Failed, indistinguishable from a normal unclean exit) |
+| `msb` process crashes | Guest VM, in-flight I/O | Image cache on disk | The runtime container exits non-zero; the controller reads that, patches the CRD, deletes it if `ephemeral`, or cold-boots a new Pod under `runPolicy: RerunOnFailure` |
+| Pod OOMKilled by kubelet | Same | Same | k8s reports the container OOMKilled; the controller handles it identically |
+| `msb-daemon` crashes mid-run | Nothing; sandboxes keep running | Image cache on disk | The daemon holds no sandbox state; on restart it resumes the device plugin and image-pull watch. Images already cached are untouched; a pod mid-pull waits until the daemon returns |
 | `msb-controller` crashes | Nothing; sandboxes keep running | Everything | Controller restarts, re-watches all CRDs, reconciles idempotently |
 | Node graceful drain | Guest VM (after pod eviction) | CRD in Kubernetes API, image cache on other nodes | Pod evicted; controller marks CRD Failed or creates new Pod per `runPolicy` |
 | Node hard crash | Guest VM, node-local state (lost) | CRD in Kubernetes API only | Pod stuck `Unknown`; controller marks CRD Failed after configurable timeout (default 5m) |
 | Kubernetes API unavailable | Operator cannot reconcile | Sandboxes running on nodes (orphaned) | Operator cannot reconcile; manual recovery; sandboxes run until natural exit |
-
-#### Daemon re-adoption on restart
-
-Covered in [Daemon Crash and Re-adoption](#daemon-crash-and-re-adoption).
 
 #### Sandbox lifecycle state machine
 
@@ -801,7 +736,7 @@ Two ServiceAccounts, each scoped to the minimum needed. No component has Secret 
 
 **`msb-controller`** has a ClusterRole covering Sandbox CRDs, pods, services, events, and leases. It has no secrets access.
 
-**`msb-daemon`** has a ClusterRole with `pods: patch` (to write termination annotations) and `nodes: get`. The node read is cluster-wide because RBAC cannot scope to a single node via fieldSelector; this is a known over-permission. The pod patch is similarly cluster-wide, which means a compromised daemon on one node could annotate pods it does not own. Both are V1 limitations acknowledged here; the Helm chart should document them.
+**`msb-daemon`** has a ClusterRole with `pods: get/list/watch` (read-only, to spot pods scheduled on its node and pull their images). The watch is cluster-wide because RBAC cannot scope a fieldSelector to a single node; a field selector narrows it to the node at query time. This read is the daemon's only Kubernetes access — it writes nothing.
 
 Mounting the Secret exposes the pod to exactly the Secrets it references and nothing more — tighter than an API read, which RBAC can only grant across all Secrets in a namespace.
 
@@ -965,9 +900,9 @@ _Mitigation:_ the volume holds only the referenced Secret keys and is never writ
 
 **Decision: exec-based (current).**
 
-The `msb-runtime` container uses the msb Rust SDK to boot `msb` in detached mode; the daemon tracks the PID via SQLite and reads SQLite for status. No changes to `msb` internals required.
+The `msb-runtime` container uses the msb Rust SDK to boot `msb` in detached mode, and the operator observes the sandbox through Kubernetes — the runtime container's status *is* the sandbox's status. No changes to `msb` internals required, and no side channel.
 
-**Rejected: Unix socket management API.** Adding a socket API to `msb` (analogous to [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor)'s socket that Virtink uses) would allow the daemon to call `VmInfo()`-equivalent RPCs instead of scraping SQLite. More robust and richer lifecycle events, but requires invasive changes to `msb`. Deferred until exec-based limitations become concrete.
+**Rejected: Unix socket management API.** A socket API on `msb` (analogous to [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor)'s socket that Virtink uses) would allow `VmInfo()`-equivalent RPCs and richer lifecycle events, but requires invasive changes to `msb`. Deferred until the container-status signal proves insufficient.
 
 ### Sidecar vs daemon-level bridge
 
@@ -1001,17 +936,13 @@ V1 sandboxes are stateless: the upper layer is a raw host file thrown away on ex
 
 Data movement between PVCs uses [CDI](https://github.com/kubevirt/containerized-data-importer). CDI selects the best available clone strategy: CSI native clone (no network I/O, requires same StorageClass), VolumeSnapshot clone (requires a VolumeSnapshotClass), or host-assisted clone (bytes stream over the network, works across any two StorageClasses). CDI never sets node affinity on cloned PVCs; topology is the CSI driver's concern. This requires a clean `msb` API for booting from a pre-existing block device path.
 
-**2. Termination state relay: Pod annotation vs daemon status patch**
-
-The daemon writes `terminationReason` to a Pod annotation; the controller reads it and copies it into `Sandbox.status`. This keeps the controller as the sole writer of CRD status, but creates a race for `ephemeral: true` sandboxes: ownerRef cascade GCs the pod immediately on CRD deletion, and the controller may not read the annotation in time. The alternative is for the daemon to patch `Sandbox.status.terminationReason` directly, which eliminates the race but introduces two writers on the status subresource. A partitioned status object (`status.node` owned by daemon, `status.phase` owned by controller) is the natural resolution but the right shape is unresolved.
-
-**3. msb-bridge: universal sidecar vs opt-in**
+**2. msb-bridge: universal sidecar vs opt-in**
 
 The controller injects `msb-bridge` into every sandbox pod unconditionally. For ephemeral task-runner sandboxes (`runPolicy: Once`, no `publishedPorts`), the bridge is unreachable before the sandbox exits; it adds a container, an image pull, and a Service with no benefit. The counterargument is operational simplicity: no conditional controller logic, no user-facing knob to set wrong, and the SDK always works against any sandbox. The unresolved question is whether a `spec.access.bridge: false` field is worth the controller complexity, or whether making the bridge image small enough renders the cost negligible.
 
-**4. Management socket and lifecycle operations**
+**3. Management socket and lifecycle operations**
 
-The daemon currently observes `msb` by scraping SQLite and polling the PID. A management socket on `msb`, analogous to Cloud Hypervisor's `/run/cloud-hypervisor.sock` used by Virtink, would replace polling with typed RPCs and unlock operations that are not cleanly expressible today:
+The operator observes `msb` only through the runtime container's Kubernetes status — coarse-grained, and blind to what happens inside the guest. A management socket on `msb`, analogous to Cloud Hypervisor's `/run/cloud-hypervisor.sock` used by Virtink, would expose typed RPCs and unlock operations that are not cleanly expressible today:
 
 | Operation | Current state | With management socket |
 |-----------|--------------|------------------------|
@@ -1021,7 +952,7 @@ The daemon currently observes `msb` by scraping SQLite and polling the PID. A ma
 
 The `agentd` relay socket already exists for exec/file operations; the question is whether lifecycle operations warrant a second socket. The trigger to add it is a concrete requirement (graceful shutdown for databases, pause for snapshotting) that cannot be built cleanly on top of signal+polling.
 
-**5. Snapshot CRDs**
+**4. Snapshot CRDs**
 
 `msb` has a complete offline snapshot system (CLI, Rust and Python SDKs, manifest with integrity verification). The primitives exist; the question is the Kubernetes API shape. The idiomatic pattern, following VolumeSnapshot and KubeVirt VirtualMachineSnapshot, is three CRDs: `SandboxSnapshot` (namespace-scoped, user-created), `SandboxSnapshotContent` (controller-managed, holds the artifact reference), and `SandboxSnapshotClass` (cluster-scoped, admin-facing). Boot-from-snapshot on `SandboxSpec` uses a typed `bootSource.snapshotRef` rather than an untyped string. The snapshot content backend maps naturally onto a PVC once persistent storage moves off `hostPath`.
 
