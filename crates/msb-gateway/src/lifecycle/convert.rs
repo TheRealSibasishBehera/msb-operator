@@ -3,10 +3,11 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use kube::api::ObjectMeta;
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudRootfsSource, CloudRlimit,
-    CloudRlimitResource, CloudSandboxStatus, SecurityProfile as WireSecurityProfile,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudRlimit, CloudRlimitResource,
+    CloudRootfsSource, CloudSandboxStatus, SecurityProfile as WireSecurityProfile,
 };
 use msb_crd::sandbox::{Rlimit, RlimitResource, SecurityProfile};
 use msb_crd::{Sandbox, SandboxPhase, SandboxSpec, SandboxStatus};
@@ -70,7 +71,8 @@ fn is_k8s_label_segment(v: &str) -> bool {
         return true;
     }
     v.len() <= 63
-        && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
         && v.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
         && v.bytes().last().is_some_and(|b| b.is_ascii_alphanumeric())
 }
@@ -97,7 +99,7 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         _ => {
             return Err(GatewayError::InvalidRequest(
                 "only OCI image references are supported".into(),
-            ))
+            ));
         }
     };
 
@@ -139,7 +141,10 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
     let mut ann = BTreeMap::new();
     if let Some(lvl) = spec.runtime.log_level {
         if let Ok(j) = serde_json::to_string(&lvl) {
-            ann.insert(format!("{CLOUD_ANN}log-level"), j.trim_matches('"').to_string());
+            ann.insert(
+                format!("{CLOUD_ANN}log-level"),
+                j.trim_matches('"').to_string(),
+            );
         }
     }
     if !spec.runtime.scripts.is_empty() {
@@ -256,12 +261,12 @@ pub fn sandbox_to_cloud(sb: &Sandbox, _namespace: &str) -> CloudCreateSandboxRes
     let status = sb.status.clone().unwrap_or_default();
 
     let terminating = meta.deletion_timestamp.is_some();
-    let has_started = status.started_at.is_some()
-        || matches!(status.phase, Some(SandboxPhase::Running));
+    let has_started =
+        status.started_at.is_some() || matches!(status.phase, Some(SandboxPhase::Running));
 
     let wire_status = phase_to_status(status.phase.clone(), terminating, has_started);
-    let started_at = parse_ts(status.started_at.as_deref());
-    let stopped_at = parse_ts(status.terminated_at.as_deref());
+    let started_at = time_to_chrono(status.started_at.as_ref());
+    let stopped_at = time_to_chrono(status.terminated_at.as_ref());
     let last_error = last_error(&status);
 
     CloudCreateSandboxResponse {
@@ -293,18 +298,15 @@ fn last_error(status: &SandboxStatus) -> Option<String> {
     })
 }
 
-fn parse_ts(s: Option<&str>) -> Option<DateTime<Utc>> {
-    s.and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+/// k8s-openapi's `Time` wraps a `jiff::Timestamp`; format to RFC3339 and parse
+/// into chrono to avoid a jiff↔chrono dependency bridge.
+fn time_to_chrono(t: Option<&Time>) -> Option<DateTime<Utc>> {
+    t.and_then(|t| DateTime::parse_from_rfc3339(&t.0.to_string()).ok())
         .map(|dt| dt.with_timezone(&Utc))
 }
 
 fn meta_created_at(meta: &ObjectMeta) -> DateTime<Utc> {
-    // k8s-openapi's `Time` wraps a jiff::Timestamp; format to RFC3339 and parse
-    // into chrono to avoid a jiff↔chrono dependency bridge.
-    meta.creation_timestamp
-        .as_ref()
-        .and_then(|t| DateTime::parse_from_rfc3339(&t.0.to_string()).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+    time_to_chrono(meta.creation_timestamp.as_ref())
         .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap())
 }
 
@@ -374,7 +376,13 @@ mod tests {
         assert_eq!(spec.workdir.as_deref(), Some("/app"));
         assert_eq!(spec.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(spec.user.as_deref(), Some("appuser"));
-        assert_eq!(spec.env, vec![msb_crd::sandbox::EnvVar { name: "K".into(), value: "V".into() }]);
+        assert_eq!(
+            spec.env,
+            vec![msb_crd::sandbox::EnvVar {
+                name: "K".into(),
+                value: "V".into()
+            }]
+        );
         assert!(spec.ephemeral);
         assert_eq!(spec.max_duration_secs, Some(600));
     }
@@ -383,8 +391,14 @@ mod tests {
     fn k8s_valid_labels_map_to_metadata_labels() {
         let mut r = req();
         r.spec.labels.insert("app".into(), "web".into());
-        r.spec.labels.insert("team.example.com/tier".into(), "frontend".into());
-        let SpecMapping { labels, annotations: ann, .. } = request_to_spec(&r).unwrap();
+        r.spec
+            .labels
+            .insert("team.example.com/tier".into(), "frontend".into());
+        let SpecMapping {
+            labels,
+            annotations: ann,
+            ..
+        } = request_to_spec(&r).unwrap();
         assert_eq!(labels.get("app").unwrap(), "web");
         assert_eq!(labels.get("team.example.com/tier").unwrap(), "frontend");
         // No cloud-label.* annotation for a label that fit metadata.labels.
@@ -395,8 +409,14 @@ mod tests {
     fn free_form_labels_fall_back_to_annotations() {
         let mut r = req();
         // Value too long / illegal charset for a k8s label — preserved, not dropped.
-        r.spec.labels.insert("note".into(), "a value with spaces".into());
-        let SpecMapping { labels, annotations: ann, .. } = request_to_spec(&r).unwrap();
+        r.spec
+            .labels
+            .insert("note".into(), "a value with spaces".into());
+        let SpecMapping {
+            labels,
+            annotations: ann,
+            ..
+        } = request_to_spec(&r).unwrap();
         assert!(!labels.contains_key("note"));
         assert_eq!(
             ann.get("microsandbox.dev/cloud-label.note").unwrap(),
@@ -447,21 +467,45 @@ mod tests {
     fn bad_name_rejected_by_request_to_spec() {
         let mut r = req();
         r.spec.name = "BAD_NAME".into();
-        assert!(matches!(request_to_spec(&r), Err(GatewayError::InvalidRequest(_))));
+        assert!(matches!(
+            request_to_spec(&r),
+            Err(GatewayError::InvalidRequest(_))
+        ));
     }
 
     #[test]
     fn status_maps_all_six_variants() {
         use CloudSandboxStatus::*;
-        assert!(matches!(phase_to_status(Some(SandboxPhase::Running), false, true), Running));
-        assert!(matches!(phase_to_status(Some(SandboxPhase::Succeeded), false, true), Stopped));
-        assert!(matches!(phase_to_status(Some(SandboxPhase::Stopped), false, true), Stopped));
-        assert!(matches!(phase_to_status(Some(SandboxPhase::Failed), false, true), Failed));
+        assert!(matches!(
+            phase_to_status(Some(SandboxPhase::Running), false, true),
+            Running
+        ));
+        assert!(matches!(
+            phase_to_status(Some(SandboxPhase::Succeeded), false, true),
+            Stopped
+        ));
+        assert!(matches!(
+            phase_to_status(Some(SandboxPhase::Stopped), false, true),
+            Stopped
+        ));
+        assert!(matches!(
+            phase_to_status(Some(SandboxPhase::Failed), false, true),
+            Failed
+        ));
         // terminating overrides everything
-        assert!(matches!(phase_to_status(Some(SandboxPhase::Running), true, true), Stopping));
+        assert!(matches!(
+            phase_to_status(Some(SandboxPhase::Running), true, true),
+            Stopping
+        ));
         // Pending + started = Starting; Pending + not started = Created
-        assert!(matches!(phase_to_status(Some(SandboxPhase::Pending), false, true), Starting));
-        assert!(matches!(phase_to_status(Some(SandboxPhase::Pending), false, false), Created));
+        assert!(matches!(
+            phase_to_status(Some(SandboxPhase::Pending), false, true),
+            Starting
+        ));
+        assert!(matches!(
+            phase_to_status(Some(SandboxPhase::Pending), false, false),
+            Created
+        ));
     }
 
     #[test]
@@ -487,7 +531,11 @@ mod tests {
     fn gateway_created_sandbox_maps_to_response() {
         // Simulate what create writes, then map back: the response carries
         // lifecycle state derived from spec + metadata.
-        let SpecMapping { spec, labels, annotations: ann } = request_to_spec(&req()).unwrap();
+        let SpecMapping {
+            spec,
+            labels,
+            annotations: ann,
+        } = request_to_spec(&req()).unwrap();
         let sb = Sandbox {
             metadata: ObjectMeta {
                 name: Some("my-sb".into()),

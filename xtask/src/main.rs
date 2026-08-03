@@ -6,16 +6,20 @@ use kube::CustomResourceExt;
 use msb_crd::Sandbox;
 use std::{fs, path::Path};
 
+mod api_docs;
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("generate-crd") => generate_crd(),
         Some("generate-rbac") => generate_rbac(),
+        Some("generate-api-docs") => api_docs::generate(),
         Some(cmd) => bail!("unknown command: {cmd}"),
         None => bail!(
             "usage: cargo xtask <command>\n  \
-             generate-crd     write deploy/crds/sandboxes.yaml\n  \
-             generate-rbac    write deploy/rbac/controller-clusterrole.yaml"
+             generate-crd       write deploy/crds/sandboxes.yaml\n  \
+             generate-rbac      write deploy/rbac/controller-clusterrole.yaml\n  \
+             generate-api-docs  write userdocs/reference/sandbox-{{spec,status}}.mdx"
         ),
     }
 }
@@ -109,19 +113,14 @@ fn generate_crd() -> Result<()> {
         let Some(root) = schema.open_api_v3_schema.as_mut() else {
             continue;
         };
-        let Some(spec) = root
-            .properties
-            .as_mut()
-            .and_then(|p| p.get_mut("spec"))
-        else {
+        let Some(spec) = root.properties.as_mut().and_then(|p| p.get_mut("spec")) else {
             continue;
         };
         spec.x_kubernetes_validations
             .get_or_insert_with(Vec::new)
             .extend([
                 ValidationRule {
-                    rule: "self.cpus <= (has(self.maxCpus) ? self.maxCpus : self.cpus)"
-                        .to_string(),
+                    rule: "self.cpus <= (has(self.maxCpus) ? self.maxCpus : self.cpus)".to_string(),
                     message: Some("spec.cpus must not exceed spec.maxCpus".to_string()),
                     ..Default::default()
                 },
@@ -148,6 +147,20 @@ fn generate_crd() -> Result<()> {
                     message: Some(format!("spec.{name} is immutable after creation")),
                     ..Default::default()
                 });
+        }
+
+        // `status.conditions` is a standard `metav1.Condition` list. schemars can't
+        // emit the list-map markers, so stamp them here: server-side apply then
+        // merges conditions by `type` instead of replacing the whole array.
+        if let Some(conditions) = root
+            .properties
+            .as_mut()
+            .and_then(|p| p.get_mut("status"))
+            .and_then(|s| s.properties.as_mut())
+            .and_then(|p| p.get_mut("conditions"))
+        {
+            conditions.x_kubernetes_list_type = Some("map".to_string());
+            conditions.x_kubernetes_list_map_keys = Some(vec!["type".to_string()]);
         }
     }
 

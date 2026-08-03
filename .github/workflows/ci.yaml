@@ -31,6 +31,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+  generated:
+    name: generated artifacts up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate CRD, RBAC, and API docs
+        run: |
+          cargo run -p xtask -- generate-crd
+          cargo run -p xtask -- generate-rbac
+          cargo run -p xtask -- generate-api-docs
+      - name: Fail if anything changed
+        run: |
+          if ! git diff --quiet; then
+            echo "Generated files are out of date. Run the xtask generators and commit the result:"
+            git diff --stat
+            exit 1
+          fi
+
   crd:
     name: generate + apply CRD
     runs-on: ubuntu-latest
