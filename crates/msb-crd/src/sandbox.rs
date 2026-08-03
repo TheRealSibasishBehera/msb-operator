@@ -16,11 +16,12 @@ use serde::{Deserialize, Serialize};
     shortname = "sb",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].status"}"#,
-    printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.terminationReason"}"#,
-    printcolumn = r#"{"name":"Exit","type":"integer","jsonPath":".status.exitCode"}"#,
     printcolumn = r#"{"name":"Restarts","type":"integer","jsonPath":".status.restartCount"}"#,
-    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // -o wide only: single-sandbox diagnostics, not list-scanning columns.
+    printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.terminationReason","priority":1}"#,
+    printcolumn = r#"{"name":"Exit","type":"integer","jsonPath":".status.exitCode","priority":1}"#,
+    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName","priority":1}"#
 )]
 #[kube(schema = "derived")]
 #[serde(rename_all = "camelCase")]
