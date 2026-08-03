@@ -400,7 +400,7 @@ async fn reconcile_resize(
     name: &str,
 ) -> Result<Action, Error> {
     if !resize_pending(sandbox) {
-        return Ok(Action::await_change());
+        return clear_restart_required(sandbox, sandboxes, name).await;
     }
 
     let now = now_time();
@@ -510,6 +510,40 @@ async fn reconcile_resize(
             "conditions": conditions,
         }
     });
+    patch_status_merge(sandboxes, name, &status).await?;
+    Ok(Action::await_change())
+}
+
+/// Clear a stale `RestartRequired: True` once its resize was applied. No-op
+/// unless the flag is set.
+async fn clear_restart_required(
+    sandbox: &Sandbox,
+    sandboxes: &Api<Sandbox>,
+    name: &str,
+) -> Result<Action, Error> {
+    let stale = sandbox
+        .status
+        .as_ref()
+        .map(|s| &s.conditions)
+        .into_iter()
+        .flatten()
+        .any(|c| c.type_ == conditions::RESTART_REQUIRED && c.status == "True");
+    if !stale {
+        return Ok(Action::await_change());
+    }
+
+    let mut conditions = prior_conditions(sandbox);
+    conditions::set(
+        &mut conditions,
+        conditions::restart_required(
+            false,
+            "Resized",
+            "resize applied",
+            sandbox.metadata.generation,
+            now_time(),
+        ),
+    );
+    let status = json!({ "status": { "conditions": conditions } });
     patch_status_merge(sandboxes, name, &status).await?;
     Ok(Action::await_change())
 }
