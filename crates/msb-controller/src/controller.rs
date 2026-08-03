@@ -2,13 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{Pod, Service};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::{Api, Client, Resource, ResourceExt};
-use msb_crd::{
-    RunPolicy, Sandbox, SandboxCondition, SandboxPhase, SandboxStatus, TerminationReason,
-};
+use msb_crd::{RunPolicy, Sandbox, SandboxPhase, SandboxStatus, TerminationReason};
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -29,7 +28,7 @@ fn event(type_: EventType, reason: &str, note: &str) -> Event {
     }
 }
 
-fn prior_conditions(sandbox: &Sandbox) -> Vec<SandboxCondition> {
+fn prior_conditions(sandbox: &Sandbox) -> Vec<Condition> {
     sandbox
         .status
         .as_ref()
@@ -313,11 +312,17 @@ async fn mark_running(
         return reconcile_resize(sandbox, ctx, sandboxes, name).await;
     }
 
-    let now = now_rfc3339();
+    let now = now_time();
     let mut conditions = prior_conditions(sandbox);
     conditions::set(
         &mut conditions,
-        conditions::ready(true, "PodRunning", "sandbox pod is running", now.clone()),
+        conditions::ready(
+            true,
+            "PodRunning",
+            "sandbox pod is running",
+            sandbox.metadata.generation,
+            now.clone(),
+        ),
     );
     let service_name = sandbox
         .namespace()
@@ -340,7 +345,11 @@ async fn mark_running(
         node_name: pod.spec.as_ref().and_then(|s| s.node_name.clone()),
         started_at: Some(now),
         // Preserve the retry count across the Pending→Running transition.
-        restart_count: sandbox.status.as_ref().map(|s| s.restart_count).unwrap_or(0),
+        restart_count: sandbox
+            .status
+            .as_ref()
+            .map(|s| s.restart_count)
+            .unwrap_or(0),
         exposed_ports,
         applied_cpus: Some(sandbox.spec.cpus),
         applied_memory: Some(sandbox.spec.memory),
@@ -366,7 +375,8 @@ fn resize_pending(sandbox: &Sandbox) -> bool {
     let Some(status) = sandbox.status.as_ref() else {
         return false;
     };
-    status.applied_cpus != Some(sandbox.spec.cpus) || status.applied_memory != Some(sandbox.spec.memory)
+    status.applied_cpus != Some(sandbox.spec.cpus)
+        || status.applied_memory != Some(sandbox.spec.memory)
 }
 
 /// Applies a pending `spec.cpus`/`spec.memory` edit to an already-Running
@@ -383,12 +393,13 @@ async fn reconcile_resize(
         return Ok(Action::await_change());
     }
 
-    let now = now_rfc3339();
+    let now = now_time();
     let mut conditions = prior_conditions(sandbox);
 
     // A dimension with no reserved headroom can't hotplug (its control listener
     // never spawned), so a change to it needs a restart. Skip the doomed attempt.
-    let cpus_changed = sandbox.status.as_ref().and_then(|s| s.applied_cpus) != Some(sandbox.spec.cpus);
+    let cpus_changed =
+        sandbox.status.as_ref().and_then(|s| s.applied_cpus) != Some(sandbox.spec.cpus);
     let memory_changed =
         sandbox.status.as_ref().and_then(|s| s.applied_memory) != Some(sandbox.spec.memory);
     if (cpus_changed && !resize::cpus_have_headroom(&sandbox.spec))
@@ -402,6 +413,7 @@ async fn reconcile_resize(
                 "spec.cpus/spec.memory changed but the sandbox booted without hotplug headroom \
                  (set maxCpus/maxMemory above cpus/memory at creation); restart the sandbox \
                  (desiredState Stopped then Running) to apply",
+                sandbox.metadata.generation,
                 now,
             ),
         );
@@ -411,11 +423,7 @@ async fn reconcile_resize(
         return Ok(Action::await_change());
     }
 
-    let Some(service_name) = sandbox
-        .status
-        .as_ref()
-        .and_then(|s| s.service_name.clone())
-    else {
+    let Some(service_name) = sandbox.status.as_ref().and_then(|s| s.service_name.clone()) else {
         return Ok(Action::requeue(REQUEUE_WHILE_PENDING));
     };
     let namespace = sandbox.namespace().ok_or_else(|| Error::MissingObjectKey {
@@ -432,7 +440,13 @@ async fn reconcile_resize(
     let mut live_error = None;
 
     if applied_cpus != Some(sandbox.spec.cpus) {
-        match resize::apply(&ctx.http, &url, &resize::cpu_target_request(sandbox.spec.cpus)).await {
+        match resize::apply(
+            &ctx.http,
+            &url,
+            &resize::cpu_target_request(sandbox.spec.cpus),
+        )
+        .await
+        {
             Ok(_) => new_applied_cpus = Some(sandbox.spec.cpus),
             Err(e) => live_error = Some(e.to_string()),
         }
@@ -460,6 +474,7 @@ async fn reconcile_resize(
                     "live resize failed ({error}); restart the sandbox (desiredState Stopped \
                      then Running) to apply spec.cpus/spec.memory"
                 ),
+                sandbox.metadata.generation,
                 now,
             ),
         );
@@ -467,7 +482,13 @@ async fn reconcile_resize(
     } else {
         conditions::set(
             &mut conditions,
-            conditions::restart_required(false, "Resized", "resize applied live", now),
+            conditions::restart_required(
+                false,
+                "Resized",
+                "resize applied live",
+                sandbox.metadata.generation,
+                now,
+            ),
         );
         info!(sandbox = %name, cpus = new_applied_cpus, memory = new_applied_memory, "resized live");
     }
@@ -501,8 +522,8 @@ async fn terminate(
     let terminated_at = pod
         .annotations()
         .get(ANN_TERMINATED_AT)
-        .cloned()
-        .unwrap_or_else(now_rfc3339);
+        .and_then(|s| s.parse().ok().map(Time))
+        .unwrap_or_else(now_time);
 
     // Derive success from the runtime container's exit, not the pod phase: the
     // pod can still be Running (bridge sidecar alive) when the runtime has exited.
@@ -536,7 +557,13 @@ async fn terminate(
     let mut conditions = prior_conditions(sandbox);
     conditions::set(
         &mut conditions,
-        conditions::ready(false, &reason_str, "sandbox exited", now_rfc3339()),
+        conditions::ready(
+            false,
+            &reason_str,
+            "sandbox exited",
+            sandbox.metadata.generation,
+            now_time(),
+        ),
     );
 
     // Carry forward the fields the Running phase set: a merge patch reads a
@@ -632,7 +659,13 @@ async fn handle_vanished_pod(
     let mut conditions = prior_conditions(sandbox);
     conditions::set(
         &mut conditions,
-        conditions::ready(false, "NodeLost", "sandbox pod disappeared", now_rfc3339()),
+        conditions::ready(
+            false,
+            "NodeLost",
+            "sandbox pod disappeared",
+            sandbox.metadata.generation,
+            now_time(),
+        ),
     );
 
     let status = SandboxStatus {
@@ -641,17 +674,37 @@ async fn handle_vanished_pod(
         } else {
             SandboxPhase::Failed
         }),
-        pod_name: if retrying { None } else { prior.and_then(|s| s.pod_name.clone()) },
+        pod_name: if retrying {
+            None
+        } else {
+            prior.and_then(|s| s.pod_name.clone())
+        },
         service_name: prior.and_then(|s| s.service_name.clone()),
         node_name: prior.and_then(|s| s.node_name.clone()),
-        started_at: if retrying { None } else { prior.and_then(|s| s.started_at.clone()) },
-        terminated_at: Some(now_rfc3339()),
+        started_at: if retrying {
+            None
+        } else {
+            prior.and_then(|s| s.started_at.clone())
+        },
+        terminated_at: Some(now_time()),
         termination_reason: Some(reason),
         exit_code: None,
-        restart_count: if retrying { restart_count + 1 } else { restart_count },
+        restart_count: if retrying {
+            restart_count + 1
+        } else {
+            restart_count
+        },
         exposed_ports: prior.map(|s| s.exposed_ports.clone()).unwrap_or_default(),
-        applied_cpus: if retrying { None } else { prior.and_then(|s| s.applied_cpus) },
-        applied_memory: if retrying { None } else { prior.and_then(|s| s.applied_memory) },
+        applied_cpus: if retrying {
+            None
+        } else {
+            prior.and_then(|s| s.applied_cpus)
+        },
+        applied_memory: if retrying {
+            None
+        } else {
+            prior.and_then(|s| s.applied_memory)
+        },
         conditions,
     };
     patch_status(sandboxes, name, &status).await?;
@@ -710,22 +763,35 @@ async fn mark_stopped(
         return Ok(Action::await_change());
     }
 
-    let now = now_rfc3339();
     let mut conditions = prior_conditions(sandbox);
     conditions::set(
         &mut conditions,
-        conditions::ready(false, "Stopped", "sandbox is stopped by desiredState", now),
+        conditions::ready(
+            false,
+            "Stopped",
+            "sandbox is stopped by desiredState",
+            sandbox.metadata.generation,
+            now_time(),
+        ),
     );
     let status = SandboxStatus {
         phase: Some(SandboxPhase::Stopped),
-        restart_count: sandbox.status.as_ref().map(|s| s.restart_count).unwrap_or(0),
+        restart_count: sandbox
+            .status
+            .as_ref()
+            .map(|s| s.restart_count)
+            .unwrap_or(0),
         conditions,
         ..Default::default()
     };
     patch_status(sandboxes, name, &status).await?;
     ctx.recorder
         .publish(
-            &event(EventType::Normal, "Stopped", "sandbox stopped by desiredState"),
+            &event(
+                EventType::Normal,
+                "Stopped",
+                "sandbox stopped by desiredState",
+            ),
             &sandbox.object_ref(&()),
         )
         .await
@@ -818,8 +884,8 @@ fn is_not_found(err: &kube::Error) -> bool {
     matches!(err, kube::Error::Api(e) if e.code == 404)
 }
 
-fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn now_time() -> Time {
+    Time(k8s_openapi::jiff::Timestamp::now())
 }
 
 #[cfg(test)]
@@ -892,7 +958,9 @@ mod tests {
                         state: Some(ContainerState {
                             terminated: Some(ContainerStateTerminated {
                                 exit_code,
-                                reason: Some(if exit_code == 0 { "Completed" } else { "Error" }.into()),
+                                reason: Some(
+                                    if exit_code == 0 { "Completed" } else { "Error" }.into(),
+                                ),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -1102,11 +1170,12 @@ mod tests {
     // must re-send startedAt/nodeName or it wipes what the Running phase recorded.
     #[test]
     fn terminate_status_preserves_fields_set_while_running() {
+        let started = Time("2026-07-17T10:00:00Z".parse().unwrap());
         let prior = SandboxStatus {
             phase: Some(SandboxPhase::Running),
             pod_name: Some("sandbox-my-sandbox".to_string()),
             node_name: Some("node-1".to_string()),
-            started_at: Some("2026-07-17T10:00:00Z".to_string()),
+            started_at: Some(started.clone()),
             ..Default::default()
         };
 
@@ -1115,16 +1184,13 @@ mod tests {
             pod_name: Some("sandbox-my-sandbox".to_string()),
             node_name: prior.node_name.clone(),
             started_at: prior.started_at.clone(),
-            terminated_at: Some("2026-07-17T10:05:00Z".to_string()),
+            terminated_at: Some(Time("2026-07-17T10:05:00Z".parse().unwrap())),
             termination_reason: Some(TerminationReason::Completed),
             exit_code: Some(0),
             ..Default::default()
         };
 
-        assert_eq!(
-            terminated.started_at.as_deref(),
-            Some("2026-07-17T10:00:00Z")
-        );
+        assert_eq!(terminated.started_at, Some(started));
         assert_eq!(terminated.node_name.as_deref(), Some("node-1"));
     }
 
@@ -1141,11 +1207,16 @@ mod tests {
     #[test]
     fn rerun_on_failure_retries_only_unclean_exits() {
         use msb_crd::RunPolicy;
-        let retries = |policy: RunPolicy, succeeded: bool| {
-            !succeeded && policy == RunPolicy::RerunOnFailure
-        };
-        assert!(retries(RunPolicy::RerunOnFailure, false), "unclean + policy");
-        assert!(!retries(RunPolicy::RerunOnFailure, true), "clean exit stops");
+        let retries =
+            |policy: RunPolicy, succeeded: bool| !succeeded && policy == RunPolicy::RerunOnFailure;
+        assert!(
+            retries(RunPolicy::RerunOnFailure, false),
+            "unclean + policy"
+        );
+        assert!(
+            !retries(RunPolicy::RerunOnFailure, true),
+            "clean exit stops"
+        );
         assert!(!retries(RunPolicy::Once, false), "Once never retries");
         assert!(!retries(RunPolicy::Once, true));
     }
@@ -1170,7 +1241,10 @@ mod tests {
 
     #[test]
     fn resize_pending_is_false_with_no_status() {
-        assert!(!resize_pending(&sandbox()), "never booted, nothing applied yet");
+        assert!(
+            !resize_pending(&sandbox()),
+            "never booted, nothing applied yet"
+        );
     }
 
     #[test]
@@ -1203,13 +1277,6 @@ mod tests {
         });
         sb2.spec.memory += 1;
         assert!(resize_pending(&sb2));
-    }
-
-    #[test]
-    fn timestamps_are_rfc3339() {
-        let ts = now_rfc3339();
-        assert!(chrono::DateTime::parse_from_rfc3339(&ts).is_ok(), "{ts}");
-        assert!(ts.ends_with('Z'), "{ts} should be UTC");
     }
 
     #[test]

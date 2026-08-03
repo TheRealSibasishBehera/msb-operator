@@ -411,8 +411,9 @@ spec:
                 properties:
                   size:
                     default: 4Gi
-                    description: Writable overlay size as a Kubernetes resource.Quantity string (e.g. "4Gi").
-                    type: string
+                    description: Writable overlay size for the guest root (e.g. `4Gi`).
+                    nullable: true
+                    x-kubernetes-int-or-string: true
                 type: object
                 x-kubernetes-validations:
                 - message: spec.upper is immutable after creation
@@ -458,22 +459,27 @@ spec:
                 type: integer
               conditions:
                 items:
-                  description: |-
-                    A status condition, mirroring `metav1.Condition`. schemars-derived because
-                    `k8s-openapi`'s `Condition` has no `JsonSchema` impl for the CRD schema.
+                  description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
                     lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
                       type: string
                     message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
                       type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
                     reason:
-                      description: PascalCase machine-readable reason.
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
                       type: string
                     status:
-                      description: '`True`, `False`, or `Unknown`.'
+                      description: status of the condition, one of True, False, Unknown.
                       type: string
                     type:
-                      description: e.g. `Ready`, `Failed`.
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
                       type: string
                   required:
                   - lastTransitionTime
@@ -483,6 +489,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               exitCode:
                 format: int32
                 nullable: true
@@ -518,6 +527,7 @@ spec:
                 nullable: true
                 type: string
               phase:
+                description: High-level lifecycle phase the controller writes to `.status.phase`.
                 enum:
                 - Pending
                 - Running
@@ -543,13 +553,19 @@ spec:
                 nullable: true
                 type: string
               startedAt:
+                description: Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.
+                format: date-time
                 nullable: true
                 type: string
               terminatedAt:
+                description: Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.
+                format: date-time
                 nullable: true
                 type: string
               terminationReason:
-                description: Termination reason sourced from the daemon annotation or inferred by the controller.
+                description: |-
+                  Why the sandbox ended, derived by the controller from the runtime container's
+                  terminated state.
                 enum:
                 - Completed
                 - MaxDurationExceeded

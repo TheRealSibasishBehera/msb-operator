@@ -19,7 +19,9 @@ use microsandbox::Sandbox;
 use microsandbox::config::set_sdk_msb_path;
 use microsandbox::sandbox::{PullPolicy, RlimitResource, SecurityProfile};
 use microsandbox::set_libkrunfw_path;
-use msb_crd::sandbox::{RlimitResource as CrdRlimitResource, SecurityProfile as CrdSecurityProfile};
+use msb_crd::sandbox::{
+    RlimitResource as CrdRlimitResource, SecurityProfile as CrdSecurityProfile,
+};
 use msb_crd::{ResolvedSecret, SandboxSpec};
 use tracing::info;
 
@@ -86,7 +88,10 @@ fn quantity_to_mib(q: &str) -> Result<u32> {
     } else {
         (q, 1)
     };
-    let value: f64 = num.trim().parse().with_context(|| format!("invalid quantity {q:?}"))?;
+    let value: f64 = num
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid quantity {q:?}"))?;
     anyhow::ensure!(value >= 0.0, "quantity {q:?} must be non-negative");
     let bytes = value * mult_bytes as f64;
     let mib = (bytes / (1024.0 * 1024.0)).ceil();
@@ -165,8 +170,13 @@ async fn main() -> Result<()> {
 
     // Log elapsed-since-start at each boundary so the boot path is a grep.
     let t0 = std::time::Instant::now();
-    let phase =
-        |name: &str| info!(elapsed_ms = t0.elapsed().as_millis() as u64, phase = name, "boot phase");
+    let phase = |name: &str| {
+        info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            phase = name,
+            "boot phase"
+        )
+    };
 
     let cli = cli.boot;
     let spec: SandboxSpec = serde_json::from_str(&cli.spec).context("parsing MSB_SANDBOX_SPEC")?;
@@ -199,7 +209,7 @@ async fn main() -> Result<()> {
 
     // Writable overlay ("upper") capacity for the guest's `/`. Unset in the CRD
     // defaults to msb's own 4 GiB, so this only bites when the user overrides.
-    builder = builder.root_disk(quantity_to_mib(&spec.upper.size)?);
+    builder = builder.root_disk(quantity_to_mib(&spec.upper.size.0)?);
 
     if !spec.entrypoint.is_empty() {
         builder = builder.entrypoint(spec.entrypoint.clone());

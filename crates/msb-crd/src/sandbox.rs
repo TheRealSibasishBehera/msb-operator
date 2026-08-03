@@ -1,3 +1,5 @@
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -364,13 +366,13 @@ impl Default for DnsSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpperSpec {
-    /// Writable overlay size as a Kubernetes resource.Quantity string (e.g. "4Gi").
+    /// Writable overlay size for the guest root (e.g. `4Gi`).
     #[serde(default = "default_upper_size")]
-    pub size: String,
+    pub size: Quantity,
 }
 
-fn default_upper_size() -> String {
-    "4Gi".to_string()
+fn default_upper_size() -> Quantity {
+    Quantity("4Gi".to_string())
 }
 
 impl Default for UpperSpec {
@@ -467,8 +469,8 @@ pub struct SandboxStatus {
     /// clients read it here to reach the sandbox's bridge.
     pub service_name: Option<String>,
     pub node_name: Option<String>,
-    pub started_at: Option<String>,
-    pub terminated_at: Option<String>,
+    pub started_at: Option<Time>,
+    pub terminated_at: Option<Time>,
     pub termination_reason: Option<TerminationReason>,
     pub exit_code: Option<i32>,
 
@@ -491,7 +493,7 @@ pub struct SandboxStatus {
     pub applied_memory: Option<u32>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<SandboxCondition>,
+    pub conditions: Vec<Condition>,
 }
 
 /// A port reachable on the per-sandbox Service.
@@ -505,22 +507,7 @@ pub struct ExposedPort {
     pub name: String,
 }
 
-/// A status condition, mirroring `metav1.Condition`. schemars-derived because
-/// `k8s-openapi`'s `Condition` has no `JsonSchema` impl for the CRD schema.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SandboxCondition {
-    /// e.g. `Ready`, `Failed`.
-    #[serde(rename = "type")]
-    pub type_: String,
-    /// `True`, `False`, or `Unknown`.
-    pub status: String,
-    /// PascalCase machine-readable reason.
-    pub reason: String,
-    pub message: String,
-    pub last_transition_time: String,
-}
-
+/// High-level lifecycle phase the controller writes to `.status.phase`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub enum SandboxPhase {
@@ -542,16 +529,17 @@ pub enum DesiredState {
     Stopped,
 }
 
-/// Termination reason sourced from the daemon annotation or inferred by the controller.
+/// Why the sandbox ended, derived by the controller from the runtime container's
+/// terminated state.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub enum TerminationReason {
-    // Clean exits (from daemon annotation)
+    // Clean exits
     Completed,
     MaxDurationExceeded,
     IdleTimeout,
     ShutdownRequested,
-    // Unclean exits (from daemon annotation)
+    // Unclean exit
     Failed,
     // Operator-inferred (controller reads Pod/Node state; msb never sees these)
     #[serde(rename = "OOMKilled")]
@@ -623,7 +611,7 @@ mod tests {
         assert_eq!(spec.memory, 512);
         assert_eq!(spec.network.max_connections, 256);
         assert!(spec.network.enabled);
-        assert_eq!(spec.upper.size, "4Gi");
+        assert_eq!(spec.upper.size.0, "4Gi");
     }
 
     #[test]
