@@ -125,7 +125,9 @@ pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, G
         shell: spec.runtime.shell.clone(),
         user: spec.runtime.user.clone(),
         hostname: None,
-        ephemeral: spec.lifecycle.ephemeral,
+        // msb's `ephemeral` is delete-on-completion, which we don't do; our
+        // lifecycle (shutdownTime/shutdownPolicy) has no cloud-wire equivalent.
+        lifecycle: Default::default(),
         max_duration_secs: spec.lifecycle.max_duration_secs,
         idle_timeout_secs: spec.lifecycle.idle_timeout_secs,
         run_policy: Default::default(),
@@ -279,7 +281,8 @@ pub fn sandbox_to_cloud(sb: &Sandbox, _namespace: &str) -> CloudCreateSandboxRes
         // The server-owned resolved-spec projection; the SDK never reconstructs
         // the request from it, so we omit it.
         spec: None,
-        ephemeral: sb.spec.ephemeral,
+        // We never delete a sandbox on completion (msb's `ephemeral` semantic).
+        ephemeral: false,
         created_at: meta_created_at(meta),
         started_at,
         stopped_at,
@@ -383,7 +386,6 @@ mod tests {
                 value: "V".into()
             }]
         );
-        assert!(spec.ephemeral);
         assert_eq!(spec.max_duration_secs, Some(600));
     }
 
@@ -516,7 +518,7 @@ mod tests {
             "apiVersion": "sandbox.microsandbox.dev/v1alpha1",
             "kind": "Sandbox",
             "metadata": { "name": "raw-sb", "namespace": "team-a" },
-            "spec": { "image": "alpine:3.20", "cpus": 1, "memory": 512, "cmd": [], "ephemeral": false },
+            "spec": { "image": "alpine:3.20", "cpus": 1, "memory": 512, "cmd": [] },
         }));
         let cloud = sandbox_to_cloud(&sb, "team-a");
         assert_eq!(cloud.id, "raw-sb");
@@ -550,7 +552,8 @@ mod tests {
         let cloud = sandbox_to_cloud(&sb, "ns");
         assert_eq!(cloud.name, "my-sb");
         assert_eq!(cloud.id, "my-sb");
-        assert!(cloud.ephemeral);
+        // We never report delete-on-completion, even when the request asked for it.
+        assert!(!cloud.ephemeral);
         assert!(cloud.spec.is_none());
     }
 }

@@ -7,7 +7,6 @@ spec:
   cpus: 1
   memory: 512
   cmd: ["sleep", "300"]
-  ephemeral: false
   runPolicy: Once
   secrets:
     - env: API_KEY

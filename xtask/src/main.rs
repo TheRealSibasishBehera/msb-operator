@@ -101,7 +101,7 @@ fn generate_crd() -> Result<()> {
     // Seal every spec field except the mutable allowlist. kube-derive can't emit CEL
     // transition rules, so inject a `self == oldSelf` rule per field. `oldSelf` binds
     // only on update, so these seal after creation and are skipped on create.
-    const MUTABLE_FIELDS: &[&str] = &["desiredState", "cpus", "memory"];
+    const MUTABLE_FIELDS: &[&str] = &["desiredState", "cpus", "memory", "lifecycle"];
 
     for version in &mut crd.spec.versions {
         if version.name != "v1alpha1" {

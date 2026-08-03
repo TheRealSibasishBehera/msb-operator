@@ -97,13 +97,6 @@ spec:
                 x-kubernetes-validations:
                 - message: spec.env is immutable after creation
                   rule: self == oldSelf
-              ephemeral:
-                default: false
-                description: Whether to delete the Sandbox object after the sandbox exits. This field is immutable.
-                type: boolean
-                x-kubernetes-validations:
-                - message: spec.ephemeral is immutable after creation
-                  rule: self == oldSelf
               hostname:
                 description: Guest hostname. This field is immutable.
                 nullable: true
@@ -126,6 +119,30 @@ spec:
                 x-kubernetes-validations:
                 - message: spec.image is immutable after creation
                   rule: self == oldSelf
+              lifecycle:
+                default:
+                  shutdownPolicy: Retain
+                description: |-
+                  Wall-clock expiry deadline and policy. Distinct from
+                  `maxDurationSecs`/`idleTimeoutSecs`, which bound the guest's own runtime.
+                properties:
+                  shutdownPolicy:
+                    default: Retain
+                    description: |-
+                      What happens to the Sandbox object at expiry. Its pod and Service are
+                      always deleted; this governs the object itself. Mutable.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                  shutdownTime:
+                    description: |-
+                      Absolute time the sandbox expires. Unset means it never expires on a
+                      schedule. Mutable: adjust or clear it to extend, shorten, or cancel expiry.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
               logging:
                 default:
                   guestConsole: false
@@ -575,7 +592,7 @@ spec:
                 - OOMKilled
                 - Evicted
                 - NodeLost
-                - null
+                - Expired
                 nullable: true
                 type: string
             type: object

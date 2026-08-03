@@ -6,8 +6,8 @@ use k8s_openapi::api::core::v1::{
     SecurityContext, TCPSocketAction, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::Resource;
 use msb_crd::{Sandbox, SandboxSpec};
 
@@ -34,7 +34,11 @@ pub enum PodBuildError {
 
 /// Rejects published ports that collide with the bridge port or with each other,
 /// which would otherwise make the Pod/Service spec invalid at admission.
-fn validate_ports(spec: &SandboxSpec, cfg: &ControllerConfig, sandbox: &str) -> Result<(), PodBuildError> {
+fn validate_ports(
+    spec: &SandboxSpec,
+    cfg: &ControllerConfig,
+    sandbox: &str,
+) -> Result<(), PodBuildError> {
     let bridge = u16::try_from(cfg.bridge_port).unwrap_or(u16::MAX);
     let mut seen = std::collections::HashSet::new();
     for p in &spec.network.published_ports {
@@ -121,7 +125,12 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
         ("microsandbox.dev/sandbox-name".to_string(), name.clone()),
     ]);
 
-    let mut containers = vec![runtime_container(cfg, &spec_json, &flat_name, &sandbox.spec)];
+    let mut containers = vec![runtime_container(
+        cfg,
+        &spec_json,
+        &flat_name,
+        &sandbox.spec,
+    )];
     if sandbox.spec.logging.guest_console {
         containers.push(console_log_container(cfg, &flat_name));
     }
@@ -530,7 +539,7 @@ pub(crate) mod test_support {
                 shell: None,
                 user: None,
                 hostname: None,
-                ephemeral: true,
+                lifecycle: Default::default(),
                 max_duration_secs: None,
                 idle_timeout_secs: None,
                 run_policy: Default::default(),
@@ -1149,7 +1158,10 @@ mod tests {
         let c = container(&pod, "msb-console-log");
         assert_eq!(c.image.as_deref(), Some("ghcr.io/msb/runtime:dev"));
         assert_eq!(c.args, Some(vec!["console-log".to_string()]));
-        assert_eq!(env_of(c, "MSB_SANDBOX_NAME"), Some("team-a__my-sandbox".to_string()));
+        assert_eq!(
+            env_of(c, "MSB_SANDBOX_NAME"),
+            Some("team-a__my-sandbox".to_string())
+        );
         assert_eq!(env_of(c, "MSB_HOME"), Some("/msb".to_string()));
 
         let mounts = c.volume_mounts.as_ref().unwrap();
@@ -1177,7 +1189,10 @@ mod tests {
         let c = container(&pod, "msb-console-log");
         let sc = c.security_context.as_ref().unwrap();
         assert_eq!(sc.allow_privilege_escalation, Some(false));
-        assert_eq!(sc.capabilities.as_ref().unwrap().drop, Some(vec!["ALL".to_string()]));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop,
+            Some(vec!["ALL".to_string()])
+        );
         assert_eq!(sc.capabilities.as_ref().unwrap().add, None);
     }
 }

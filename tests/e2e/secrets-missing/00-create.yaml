@@ -7,7 +7,6 @@ spec:
   cpus: 1
   memory: 512
   cmd: ["sleep", "300"]
-  ephemeral: true
   runPolicy: Once
   # References a Secret that does not exist. Fail-closed: the kubelet cannot mount
   # the missing Secret volume, so the pod never starts and the sandbox never runs.

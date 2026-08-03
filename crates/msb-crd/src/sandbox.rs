@@ -88,9 +88,10 @@ pub struct SandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
 
-    /// Whether to delete the Sandbox object after the sandbox exits. This field is immutable.
+    /// Wall-clock expiry deadline and policy. Distinct from
+    /// `maxDurationSecs`/`idleTimeoutSecs`, which bound the guest's own runtime.
     #[serde(default)]
-    pub ephemeral: bool,
+    pub lifecycle: Lifecycle,
 
     /// Hard cap on total sandbox lifetime, in seconds. This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -530,6 +531,33 @@ pub enum DesiredState {
     Stopped,
 }
 
+/// Expiry policy: an absolute deadline plus what to do with the object once it
+/// passes. A guest exiting on its own never triggers this; only the deadline does.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Lifecycle {
+    /// Absolute time the sandbox expires. Unset means it never expires on a
+    /// schedule. Mutable: adjust or clear it to extend, shorten, or cancel expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_time: Option<Time>,
+
+    /// What happens to the Sandbox object at expiry. Its pod and Service are
+    /// always deleted; this governs the object itself. Mutable.
+    #[serde(default)]
+    pub shutdown_policy: ShutdownPolicy,
+}
+
+/// What to do with the Sandbox object when it expires.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum ShutdownPolicy {
+    /// Keep the object with an `Expired` status.
+    #[default]
+    Retain,
+    /// Delete the object.
+    Delete,
+}
+
 /// Why the sandbox ended, derived by the controller from the runtime container's
 /// terminated state.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -547,6 +575,8 @@ pub enum TerminationReason {
     OomKilled,
     Evicted,
     NodeLost,
+    /// The `spec.lifecycle.shutdownTime` deadline passed.
+    Expired,
 }
 
 impl TerminationReason {
@@ -557,6 +587,7 @@ impl TerminationReason {
                 | Self::MaxDurationExceeded
                 | Self::IdleTimeout
                 | Self::ShutdownRequested
+                | Self::Expired
         )
     }
 }
@@ -596,7 +627,7 @@ mod tests {
             shell: None,
             user: None,
             hostname: None,
-            ephemeral: false,
+            lifecycle: Default::default(),
             max_duration_secs: None,
             idle_timeout_secs: None,
             run_policy: RunPolicy::Once,
@@ -649,7 +680,7 @@ mod tests {
             shell: None,
             user: None,
             hostname: None,
-            ephemeral: false,
+            lifecycle: Default::default(),
             max_duration_secs: None,
             idle_timeout_secs: None,
             run_policy: RunPolicy::Once,

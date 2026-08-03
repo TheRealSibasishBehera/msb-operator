@@ -1,0 +1,24 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # shutdownTime is an absolute wall-clock deadline; allow margin for a cold boot
+  # to reach Running and be observed before it fires.
+  - script: |
+      set -e
+      deadline=$(date -u -d '+120 seconds' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                 || date -u -v+120S +%Y-%m-%dT%H:%M:%SZ)
+      kubectl apply -n "$NAMESPACE" -f - <<EOF
+      apiVersion: sandbox.microsandbox.dev/v1alpha1
+      kind: Sandbox
+      metadata:
+        name: e2e-expire-delete
+      spec:
+        image: "alpine:3.20"
+        cpus: 1
+        memory: 512
+        cmd: ["sleep", "3600"]
+        runPolicy: Once
+        lifecycle:
+          shutdownTime: "$deadline"
+          shutdownPolicy: Delete
+      EOF

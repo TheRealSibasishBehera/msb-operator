@@ -7,7 +7,7 @@ use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::{Api, Client, Resource, ResourceExt};
-use msb_crd::{RunPolicy, Sandbox, SandboxPhase, SandboxStatus, TerminationReason};
+use msb_crd::{RunPolicy, Sandbox, SandboxPhase, SandboxStatus, ShutdownPolicy, TerminationReason};
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -151,6 +151,12 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
 
+    // Expiry preempts the normal flow, so a pod deleted here is never misread as
+    // a vanished-pod failure.
+    if is_expired(&sandbox) {
+        return expire(&sandbox, &ctx, &sandboxes, &pods, &name).await;
+    }
+
     let stopped = desired_stopped(&sandbox);
 
     let Some(existing) = existing else {
@@ -160,7 +166,7 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         // Terminal sandboxes must not resurrect their pod: the controller deletes
         // the pod after recording status, and Once means no retry.
         if is_terminal(&sandbox) {
-            return finish(&sandbox, &sandboxes, &name).await;
+            return Ok(finish());
         }
         // A pod that was Running and is now gone vanished uncleanly — node loss,
         // eviction, or an external delete. It never reached a terminal phase we
@@ -366,7 +372,11 @@ async fn mark_running(
         .await
         .ok();
     info!(sandbox = %name, "running");
-    Ok(Action::await_change())
+    // Requeue at the deadline so expiry fires on time; the watch alone wouldn't.
+    Ok(match shutdown_deadline(sandbox) {
+        Some(deadline) => Action::requeue(requeue_until(&deadline)),
+        None => Action::await_change(),
+    })
 }
 
 /// Whether `spec.cpus`/`spec.memory` differ from what was last confirmed
@@ -639,7 +649,7 @@ async fn terminate(
     }
 
     info!(sandbox = %name, ?phase, ?reason, "terminated");
-    finish(sandbox, sandboxes, name).await
+    Ok(finish())
 }
 
 /// A Running pod disappeared. Record it as a `NodeLost` unclean exit, then apply
@@ -723,7 +733,7 @@ async fn handle_vanished_pod(
     }
 
     warn!(sandbox = %name, "pod lost; runPolicy is Once, settling Failed");
-    finish(sandbox, sandboxes, name).await
+    Ok(finish())
 }
 
 /// True if the sandbox's last recorded phase was `Running` — used to tell a
@@ -800,21 +810,77 @@ async fn mark_stopped(
     Ok(Action::await_change())
 }
 
-async fn finish(sandbox: &Sandbox, sandboxes: &Api<Sandbox>, name: &str) -> Result<Action, Error> {
-    if !sandbox.spec.ephemeral {
+/// Keep the terminal CR so its exit code and reason stay readable; cleanup is the
+/// user's, or an opt-in `spec.lifecycle` expiry.
+fn finish() -> Action {
+    Action::await_change()
+}
+
+/// The `shutdownTime` deadline passed: delete the pod, then delete or (default)
+/// retain-as-`Expired` the object. Only the wall-clock deadline routes here; a
+/// guest exiting on its own does not.
+async fn expire(
+    sandbox: &Sandbox,
+    ctx: &Context,
+    sandboxes: &Api<Sandbox>,
+    pods: &Api<Pod>,
+    name: &str,
+) -> Result<Action, Error> {
+    delete_pod(pods, &pod::pod_name(name), name).await?;
+
+    if sandbox.spec.lifecycle.shutdown_policy == ShutdownPolicy::Delete {
+        if let Err(source) = sandboxes.delete(name, &DeleteParams::default()).await
+            && !is_not_found(&source)
+        {
+            return Err(Error::DeleteSandbox {
+                sandbox: name.to_string(),
+                source,
+            });
+        }
+        info!(sandbox = %name, "expired; deleted per shutdownPolicy");
         return Ok(Action::await_change());
     }
 
-    if let Err(source) = sandboxes.delete(name, &DeleteParams::default()).await
-        && !is_not_found(&source)
+    // Already recorded Expired; nothing left to do.
+    if sandbox
+        .status
+        .as_ref()
+        .and_then(|s| s.termination_reason.as_ref())
+        == Some(&TerminationReason::Expired)
     {
-        return Err(Error::DeleteSandbox {
-            sandbox: name.to_string(),
-            source,
-        });
+        return Ok(Action::await_change());
     }
 
-    info!(sandbox = %name, "deleted ephemeral sandbox");
+    let mut conditions = prior_conditions(sandbox);
+    conditions::set(
+        &mut conditions,
+        conditions::ready(
+            false,
+            "Expired",
+            "shutdownTime deadline passed",
+            sandbox.metadata.generation,
+            now_time(),
+        ),
+    );
+    let prior = sandbox.status.as_ref();
+    let status = SandboxStatus {
+        phase: Some(SandboxPhase::Succeeded),
+        termination_reason: Some(TerminationReason::Expired),
+        terminated_at: Some(now_time()),
+        started_at: prior.and_then(|s| s.started_at.clone()),
+        restart_count: prior.map(|s| s.restart_count).unwrap_or(0),
+        conditions,
+        ..Default::default()
+    };
+    patch_status(sandboxes, name, &status).await?;
+    ctx.recorder
+        .publish(
+            &event(EventType::Normal, "Expired", "shutdownTime deadline passed"),
+            &sandbox.object_ref(&()),
+        )
+        .await
+        .ok();
+    info!(sandbox = %name, "expired; retained per shutdownPolicy");
     Ok(Action::await_change())
 }
 
@@ -886,6 +952,20 @@ fn is_not_found(err: &kube::Error) -> bool {
 
 fn now_time() -> Time {
     Time(k8s_openapi::jiff::Timestamp::now())
+}
+
+fn shutdown_deadline(sandbox: &Sandbox) -> Option<Time> {
+    sandbox.spec.lifecycle.shutdown_time.clone()
+}
+
+fn is_expired(sandbox: &Sandbox) -> bool {
+    shutdown_deadline(sandbox).is_some_and(|d| now_time().0 >= d.0)
+}
+
+fn requeue_until(deadline: &Time) -> Duration {
+    // Floor at 1s: a past deadline yields 0 and would hot-loop the requeue.
+    let secs = deadline.0.duration_since(now_time().0).as_secs().max(1);
+    Duration::from_secs(secs as u64)
 }
 
 #[cfg(test)]
@@ -1219,6 +1299,24 @@ mod tests {
         );
         assert!(!retries(RunPolicy::Once, false), "Once never retries");
         assert!(!retries(RunPolicy::Once, true));
+    }
+
+    #[test]
+    fn is_expired_only_when_a_past_deadline_is_set() {
+        let mut sb = sandbox();
+        assert!(!is_expired(&sb), "no deadline never expires");
+
+        sb.spec.lifecycle.shutdown_time = Some(Time("2000-01-01T00:00:00Z".parse().unwrap()));
+        assert!(is_expired(&sb), "past deadline is expired");
+
+        sb.spec.lifecycle.shutdown_time = Some(Time("2999-01-01T00:00:00Z".parse().unwrap()));
+        assert!(!is_expired(&sb), "future deadline is not yet expired");
+    }
+
+    #[test]
+    fn requeue_until_is_at_least_one_second_for_a_past_deadline() {
+        let past = Time("2000-01-01T00:00:00Z".parse().unwrap());
+        assert_eq!(requeue_until(&past), Duration::from_secs(1));
     }
 
     #[test]
