@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  images:
+    name: build and push images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [msb-controller, msb-daemon, msb-runtime, msb-bridge, msb-gateway]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lowercase registry
+        run: echo "REGISTRY=${REGISTRY,,}" >> "$GITHUB_ENV"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/${{ matrix.image }}/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ matrix.image }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  bundle:
+    name: bundle install manifests
+    needs: images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+
+      # Render, then repoint every image reference at the images CI just pushed
+      # (this owner's ghcr, at the release tag). Covers both container `image:`
+      # fields and the controller's MSB_RUNTIME_IMAGE/MSB_BRIDGE_IMAGE env values,
+      # which the kustomize image transformer would not reach.
+      - name: Render and pin images to this release
+        run: |
+          reg="${REGISTRY,,}"
+          tag="${GITHUB_REF_NAME}"
+          kubectl kustomize deploy/ > msb-operator.yaml
+          kubectl kustomize deploy/gateway/ > msb-operator-gateway.yaml
+          for img in msb-controller msb-daemon msb-runtime msb-bridge msb-gateway; do
+            sed -i "s#ghcr.io/superradcompany/$img:[^\" ]*#$reg/$img:$tag#g" \
+              msb-operator.yaml msb-operator-gateway.yaml
+          done
+          echo "== all image references in the bundle =="
+          grep -E "image: ghcr|msb-(runtime|bridge):" msb-operator.yaml msb-operator-gateway.yaml
+
+      # Make the pushed images pullable without a secret, so a plain
+      # `kubectl apply` install works with no registry auth on the node.
+      - name: Make images public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for img in msb-controller msb-daemon msb-runtime msb-bridge msb-gateway; do
+            gh api -X PATCH "/user/packages/container/$img" \
+              -f visibility=public 2>/dev/null || \
+            echo "note: could not set $img public (may already be, or needs manual toggle)"
+          done
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: |
+            msb-operator.yaml
+            msb-operator-gateway.yaml
