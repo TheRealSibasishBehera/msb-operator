@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: msb-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: msb-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: msb-gateway
+    spec:
+      serviceAccountName: msb-gateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: msb-gateway
+          image: ghcr.io/superradcompany/msb-gateway:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["--port", "$(MSB_GATEWAY_PORT)"]
+          env:
+            - name: MSB_GATEWAY_PORT
+              value: "8080"
+            - name: MSB_GATEWAY_CREATE_TIMEOUT_SECS
+              value: "25"
+            - name: MSB_GATEWAY_MAX_SESSIONS_PER_IDENTITY
+              value: "16"
+            - name: MSB_GATEWAY_MAX_FRAME_BYTES
+              value: "67108864"
+            - name: MSB_GATEWAY_MAX_SESSION_SECS
+              value: "0"
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
