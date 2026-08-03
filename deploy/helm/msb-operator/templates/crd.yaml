@@ -23,21 +23,24 @@ spec:
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
-    - jsonPath: .status.terminationReason
-      name: Reason
-      type: string
-    - jsonPath: .status.exitCode
-      name: Exit
-      type: integer
     - jsonPath: .status.restartCount
       name: Restarts
       type: integer
-    - jsonPath: .status.nodeName
-      name: Node
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.terminationReason
+      name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.exitCode
+      name: Exit
+      priority: 1
+      type: integer
+    - jsonPath: .status.nodeName
+      name: Node
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
