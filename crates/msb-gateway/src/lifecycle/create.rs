@@ -1,10 +1,10 @@
 //! `POST /v1/sandboxes[?start=true]` — the one route with real logic.
 //!
-//! Create the Sandbox CRD, then watch until it reaches `Running` within the
+//! Create the Sandbox object, then watch until it reaches `Running` within the
 //! bounded budget (< the SDK's 30s client timeout). Outcomes:
 //!   - Running within budget → 200 `CloudCreateSandboxResponse`.
-//!   - Failed first          → delete the CRD, 400 `invalid_request` (+reason).
-//!   - neither within budget → delete the CRD, 400 `invalid_request`.
+//!   - Failed first          → delete the Sandbox, 400 `invalid_request` (+reason).
+//!   - neither within budget → delete the Sandbox, 400 `invalid_request`.
 //!   - name already exists   → 409 `name_already_exists` (POST only).
 
 use std::collections::BTreeMap;

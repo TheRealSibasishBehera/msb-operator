@@ -8,6 +8,5 @@ spec:
   memory: 512
   # Runs for an hour; only maxDurationSecs can stop it in the test window.
   cmd: ["sleep", "3600"]
-  ephemeral: false
   runPolicy: Once
   maxDurationSecs: 5

@@ -1,0 +1,12 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # shutdownPolicy Delete: at the deadline the Sandbox object itself is removed.
+  - script: |
+      for i in $(seq 1 20); do
+        if ! kubectl get sandbox e2e-expire-delete -n "$NAMESPACE" >/dev/null 2>&1; then
+          echo "PASS: sandbox object deleted on expiry"; exit 0
+        fi
+        sleep 3
+      done
+      echo "FAIL: sandbox object still present after expiry"; exit 1

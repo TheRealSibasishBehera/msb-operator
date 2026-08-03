@@ -13,5 +13,4 @@ spec:
   memory: 512
   maxCpus: 2
   maxMemory: 1024
-  ephemeral: false
   runPolicy: Once

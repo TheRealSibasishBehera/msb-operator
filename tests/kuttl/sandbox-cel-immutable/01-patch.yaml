@@ -2,13 +2,21 @@ apiVersion: kuttl.dev/v1beta1
 kind: TestStep
 commands:
   - script: |
-      # CEL immutability: the API server must reject a spec patch (non-zero exit).
+      # CEL immutability: patching an immutable field must be rejected.
       # kuttl runs each case in its own namespace, so target $NAMESPACE explicitly.
       if kubectl patch sandbox test-immutable -n "$NAMESPACE" --type=merge \
-          -p '{"spec":{"cpus":4}}' 2>&1 | grep -q "immutable after creation"; then
-        echo "PASS: spec mutation rejected"
-        exit 0
+          -p '{"spec":{"image":"alpine:3.20"}}' 2>&1 | grep -q "immutable after creation"; then
+        echo "PASS: immutable field patch rejected"
       else
-        echo "FAIL: spec mutation was not rejected"
+        echo "FAIL: immutable field patch was not rejected"
+        exit 1
+      fi
+  - script: |
+      # spec.lifecycle is mutable: a deadline patch must succeed.
+      if kubectl patch sandbox test-immutable -n "$NAMESPACE" --type=merge \
+          -p '{"spec":{"lifecycle":{"shutdownTime":"2999-01-01T00:00:00Z"}}}'; then
+        echo "PASS: lifecycle patch accepted"
+      else
+        echo "FAIL: mutable lifecycle patch was rejected"
         exit 1
       fi

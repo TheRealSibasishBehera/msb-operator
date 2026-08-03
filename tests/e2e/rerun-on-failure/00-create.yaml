@@ -7,5 +7,4 @@ spec:
   cpus: 1
   memory: 512
   cmd: ["sleep", "600"]
-  ephemeral: false
   runPolicy: RerunOnFailure

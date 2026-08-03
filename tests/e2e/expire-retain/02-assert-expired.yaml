@@ -1,0 +1,9 @@
+# Default shutdownPolicy Retain: at the deadline the object is kept with an
+# Expired status. Expired is a clean stop, so the phase settles Succeeded.
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-expire-retain
+status:
+  phase: Succeeded
+  terminationReason: Expired

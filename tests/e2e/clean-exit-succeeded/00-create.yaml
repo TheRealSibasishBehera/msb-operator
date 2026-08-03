@@ -8,5 +8,4 @@ spec:
   memory: 512
   # A short command that exits cleanly, so the sandbox runs to completion.
   cmd: ["sh", "-c", "echo done"]
-  ephemeral: false
   runPolicy: Once
