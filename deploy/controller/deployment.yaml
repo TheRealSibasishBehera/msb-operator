@@ -2,11 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: msb-controller
-  namespace: msb-system
-  labels:
-    app.kubernetes.io/name: msb-controller
 spec:
-  # Two replicas with leader election: one active reconciler, one warm standby.
   replicas: 2
   selector:
     matchLabels:
@@ -24,17 +20,26 @@ spec:
           type: RuntimeDefault
       containers:
         - name: msb-controller
-          image: ghcr.io/superradcompany/msb-controller:latest
+          image: ghcr.io/superradcompany/msb-controller:0.1.0
+          imagePullPolicy: IfNotPresent
           args: ["--namespace", "$(MSB_NAMESPACE)"]
           env:
             - name: MSB_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: MSB_HOME
+              value: /msb
+            - name: MSB_BRIDGE_PORT
+              value: "7000"
+            - name: MSB_LEASE_TTL_SECS
+              value: "15"
             - name: MSB_RUNTIME_IMAGE
-              value: ghcr.io/superradcompany/msb-runtime:latest
+              value: ghcr.io/superradcompany/msb-runtime:0.1.0
             - name: MSB_BRIDGE_IMAGE
-              value: ghcr.io/superradcompany/msb-bridge:latest
+              value: ghcr.io/superradcompany/msb-bridge:0.1.0
+            - name: MSB_RUNTIME_LOG
+              value: info
             - name: RUST_LOG
               value: info
           securityContext:

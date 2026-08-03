@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: msb-daemon
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: msb-daemon
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: msb-daemon
+    spec:
+      priorityClassName: system-node-critical
+      hostPID: false
+      serviceAccountName: msb-daemon
+      containers:
+        - name: msb-daemon
+          image: ghcr.io/superradcompany/msb-daemon:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["msb-daemon", "device-plugin", "--kvm-path", "/dev/kvm"]
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: MSB_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: MSB_CACHE_HOST_PATH
+              value: /var/lib/msb/cache
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: device-plugin-dir
+              mountPath: /var/lib/kubelet/device-plugins
+            # Not the whole /dev: a read-only /dev blocks kubelet from creating
+            # /dev/termination-log in the container.
+            - name: kvm
+              mountPath: /dev/kvm
+            - name: msb-home
+              mountPath: /msb
+            - name: cache
+              mountPath: /msb/cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # Root so FOWNER can chmod o+rw /dev/kvm for non-root sandbox pods.
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["FOWNER"]
+      volumes:
+        - name: device-plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: msb-home
+          emptyDir: {}
+        - name: cache
+          hostPath:
+            path: /var/lib/msb/cache
+            type: DirectoryOrCreate
+      tolerations:
+        - operator: Exists

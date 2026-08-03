@@ -50,6 +50,11 @@ jobs:
             git diff --stat
             exit 1
           fi
+      - uses: azure/setup-kubectl@v4
+      - name: Install manifests render
+        run: |
+          kubectl kustomize deploy/ > /dev/null
+          kubectl kustomize deploy/gateway/ > /dev/null
 
   crd:
     name: generate + apply CRD
