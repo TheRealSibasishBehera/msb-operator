@@ -368,7 +368,8 @@ impl Default for DnsSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpperSpec {
-    /// Writable overlay size for the guest root (e.g. `4Gi`).
+    /// Writable overlay size for the guest root, as a Kubernetes
+    /// `resource.Quantity` (e.g. `4Gi`, `512Mi`).
     #[serde(default = "default_upper_size")]
     pub size: Quantity,
 }
@@ -458,10 +459,6 @@ pub enum RunPolicy {
 
 // --- Status ---
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxStatus {
@@ -471,14 +468,16 @@ pub struct SandboxStatus {
     /// clients read it here to reach the sandbox's bridge.
     pub service_name: Option<String>,
     pub node_name: Option<String>,
+    /// When the guest reached Running, as a Kubernetes `metav1.Time` (RFC3339).
     pub started_at: Option<Time>,
+    /// When the guest terminated, as a Kubernetes `metav1.Time` (RFC3339).
     pub terminated_at: Option<Time>,
     pub termination_reason: Option<TerminationReason>,
     pub exit_code: Option<i32>,
 
     /// Times the pod has been recreated under `runPolicy: RerunOnFailure`. Drives
     /// the requeue backoff and is surfaced so users can see a sandbox is looping.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default)]
     pub restart_count: u32,
 
     /// Ports exposed on the per-sandbox Service, reflected so `kubectl describe`

@@ -428,7 +428,9 @@ spec:
                 properties:
                   size:
                     default: 4Gi
-                    description: Writable overlay size for the guest root (e.g. `4Gi`).
+                    description: |-
+                      Writable overlay size for the guest root, as a Kubernetes
+                      `resource.Quantity` (e.g. `4Gi`, `512Mi`).
                     nullable: true
                     x-kubernetes-int-or-string: true
                 type: object
@@ -557,6 +559,7 @@ spec:
                 nullable: true
                 type: string
               restartCount:
+                default: 0
                 description: |-
                   Times the pod has been recreated under `runPolicy: RerunOnFailure`. Drives
                   the requeue backoff and is surfaced so users can see a sandbox is looping.
@@ -570,12 +573,12 @@ spec:
                 nullable: true
                 type: string
               startedAt:
-                description: Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.
+                description: When the guest reached Running, as a Kubernetes `metav1.Time` (RFC3339).
                 format: date-time
                 nullable: true
                 type: string
               terminatedAt:
-                description: Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.
+                description: When the guest terminated, as a Kubernetes `metav1.Time` (RFC3339).
                 format: date-time
                 nullable: true
                 type: string

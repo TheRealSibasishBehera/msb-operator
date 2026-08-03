@@ -16,9 +16,10 @@ const SPEC_OUT: &str = "userdocs/reference/sandbox-spec.mdx";
 const STATUS_OUT: &str = "userdocs/reference/sandbox-status.mdx";
 
 /// k8s well-known types arrive in `$defs` under their fully-qualified Go names
-/// (`io.k8s.apimachinery.pkg.apis.meta.v1.Time`). Render them the way KubeVirt's
-/// reference does: a short display name, and — for the scalar wrappers `Time` and
-/// `Quantity` — as a leaf string with no section of their own.
+/// (`io.k8s.apimachinery.pkg.apis.meta.v1.Time`). The scalar wrappers (`Time`,
+/// `Quantity`) render as their wire form (`string`) with no section of their own;
+/// the field's doc-comment names the k8s type. Struct types (`Condition`) keep a
+/// linked section.
 struct KnownType {
     display: &'static str,
     /// A scalar wrapper (rendered as `string`, no section) rather than a struct.
