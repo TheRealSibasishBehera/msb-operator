@@ -52,9 +52,20 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig, name: &str, namespace: &
     }
 }
 
+/// The first published port that collides with a reserved bridge port, if any.
+/// A collision would make a duplicate-port Service the API server rejects.
+pub fn reserved_port_conflict(sandbox: &Sandbox, cfg: &ControllerConfig) -> Option<u16> {
+    let reserved = [cfg.bridge_port, cfg.bridge_control_port];
+    sandbox
+        .spec
+        .network
+        .published_ports
+        .iter()
+        .map(|p| p.host_port())
+        .find(|host| reserved.contains(&i32::from(*host)))
+}
+
 /// The bridge port, the bridge's control port, and every published port.
-/// Callers are responsible for having rejected a published port that
-/// collides with the bridge port.
 fn service_ports(sandbox: &Sandbox, cfg: &ControllerConfig) -> Vec<ServicePort> {
     let mut ports = vec![
         ServicePort {
@@ -109,6 +120,16 @@ mod tests {
     }
 
     #[test]
+    fn reserved_port_conflict_catches_bridge_ports_only() {
+        use crate::pod::test_support::{config, sandbox_with_ports};
+        let cfg = config();
+        assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[8080]), &cfg), Some(8080));
+        assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[7000]), &cfg), Some(7000));
+        assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[9090]), &cfg), None);
+        assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[]), &cfg), None);
+    }
+
+    #[test]
     fn service_name_is_deterministic_and_distinct() {
         assert_eq!(service_name("ns", "a"), service_name("ns", "a"));
         assert_ne!(service_name("ns", "a"), service_name("ns", "b"));
@@ -123,7 +144,10 @@ mod tests {
         let spec = svc.spec.as_ref().unwrap();
         assert_eq!(spec.type_.as_deref(), Some("ClusterIP"));
         assert_eq!(
-            spec.selector.as_ref().unwrap().get("microsandbox.dev/sandbox-name"),
+            spec.selector
+                .as_ref()
+                .unwrap()
+                .get("microsandbox.dev/sandbox-name"),
             Some(&"my-sandbox".to_string())
         );
         let port = &spec.ports.as_ref().unwrap()[0];
@@ -138,7 +162,12 @@ mod tests {
     #[test]
     fn published_ports_are_added_alongside_the_bridge_port() {
         use crate::pod::test_support::{config, sandbox_with_ports};
-        let svc = build(&sandbox_with_ports(&[8000]), &config(), "my-sandbox", "team-a");
+        let svc = build(
+            &sandbox_with_ports(&[8000]),
+            &config(),
+            "my-sandbox",
+            "team-a",
+        );
         let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
         assert_eq!(ports.len(), 3, "bridge + control + one published");
         assert_eq!(ports[0].name.as_deref(), Some("agent"));
@@ -153,7 +182,10 @@ mod tests {
         use crate::pod::test_support::{config, sandbox};
         let svc = build(&sandbox(), &config(), "my-sandbox", "team-a");
         let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
-        let control = ports.iter().find(|p| p.name.as_deref() == Some("control")).unwrap();
+        let control = ports
+            .iter()
+            .find(|p| p.name.as_deref() == Some("control"))
+            .unwrap();
         assert_eq!(control.port, 8080);
         assert_eq!(control.target_port, Some(IntOrString::Int(8080)));
     }

@@ -176,6 +176,9 @@ pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Actio
         if was_running(&sandbox) {
             return handle_vanished_pod(&sandbox, &ctx, &sandboxes, &name).await;
         }
+        if let Some(port) = service::reserved_port_conflict(&sandbox, &ctx.config) {
+            return mark_port_conflict(&sandbox, &ctx, &sandboxes, &name, port).await;
+        }
         return create_pod(&sandbox, &ctx, &pods, &name).await;
     };
 
@@ -846,6 +849,54 @@ async fn mark_stopped(
         .await
         .ok();
     info!(sandbox = %name, "stopped");
+    Ok(Action::await_change())
+}
+
+/// Settle a Sandbox `Failed` with a `PortConflict` condition and create nothing,
+/// so status never advertises a Service the collision can't produce.
+async fn mark_port_conflict(
+    sandbox: &Sandbox,
+    ctx: &Context,
+    sandboxes: &Api<Sandbox>,
+    name: &str,
+    port: u16,
+) -> Result<Action, Error> {
+    let message = format!(
+        "publishedPort {port} collides with a reserved bridge port; choose a different hostPort"
+    );
+    if sandbox.status.as_ref().and_then(|s| s.termination_reason.as_ref())
+        == Some(&TerminationReason::Failed)
+        && sandbox.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&SandboxPhase::Failed)
+    {
+        return Ok(Action::await_change());
+    }
+
+    let mut conditions = prior_conditions(sandbox);
+    conditions::set(
+        &mut conditions,
+        conditions::ready(
+            false,
+            "PortConflict",
+            &message,
+            sandbox.metadata.generation,
+            now_time(),
+        ),
+    );
+    let status = SandboxStatus {
+        phase: Some(SandboxPhase::Failed),
+        termination_reason: Some(TerminationReason::Failed),
+        conditions,
+        ..Default::default()
+    };
+    patch_status(sandboxes, name, &status).await?;
+    ctx.recorder
+        .publish(
+            &event(EventType::Warning, "PortConflict", &message),
+            &sandbox.object_ref(&()),
+        )
+        .await
+        .ok();
+    warn!(sandbox = %name, port, "published port collides with a reserved bridge port");
     Ok(Action::await_change())
 }
 
