@@ -13,7 +13,7 @@ metadata:
 rules:
   - apiGroups: ["sandbox.microsandbox.dev"]
     resources: ["sandboxes"]
-    verbs: ["get", "list", "create", "delete"]
+    verbs: ["get", "list", "create", "delete", "patch"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
