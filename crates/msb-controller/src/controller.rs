@@ -372,11 +372,16 @@ async fn mark_running(
         .await
         .ok();
     info!(sandbox = %name, "running");
-    // Requeue at the deadline so expiry fires on time; the watch alone wouldn't.
-    Ok(match shutdown_deadline(sandbox) {
+    Ok(running_action(sandbox))
+}
+
+/// Requeue at the `shutdownTime` deadline (the watch wouldn't wake us for it),
+/// else await the next change.
+fn running_action(sandbox: &Sandbox) -> Action {
+    match shutdown_deadline(sandbox) {
         Some(deadline) => Action::requeue(requeue_until(&deadline)),
         None => Action::await_change(),
-    })
+    }
 }
 
 /// Whether `spec.cpus`/`spec.memory` differ from what was last confirmed
@@ -430,7 +435,7 @@ async fn reconcile_resize(
         let status = json!({ "status": { "conditions": conditions } });
         patch_status_merge(sandboxes, name, &status).await?;
         warn!(sandbox = %name, "resize needs headroom the sandbox lacks; restart required");
-        return Ok(Action::await_change());
+        return Ok(running_action(sandbox));
     }
 
     let Some(service_name) = sandbox.status.as_ref().and_then(|s| s.service_name.clone()) else {
@@ -511,7 +516,7 @@ async fn reconcile_resize(
         }
     });
     patch_status_merge(sandboxes, name, &status).await?;
-    Ok(Action::await_change())
+    Ok(running_action(sandbox))
 }
 
 /// Clear a stale `RestartRequired: True` once its resize was applied. No-op
@@ -529,7 +534,7 @@ async fn clear_restart_required(
         .flatten()
         .any(|c| c.type_ == conditions::RESTART_REQUIRED && c.status == "True");
     if !stale {
-        return Ok(Action::await_change());
+        return Ok(running_action(sandbox));
     }
 
     let mut conditions = prior_conditions(sandbox);
@@ -545,7 +550,7 @@ async fn clear_restart_required(
     );
     let status = json!({ "status": { "conditions": conditions } });
     patch_status_merge(sandboxes, name, &status).await?;
-    Ok(Action::await_change())
+    Ok(running_action(sandbox))
 }
 
 async fn terminate(
@@ -1351,6 +1356,22 @@ mod tests {
     fn requeue_until_is_at_least_one_second_for_a_past_deadline() {
         let past = Time("2000-01-01T00:00:00Z".parse().unwrap());
         assert_eq!(requeue_until(&past), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn running_action_requeues_only_with_a_deadline() {
+        let mut sb = sandbox();
+        assert_eq!(
+            running_action(&sb),
+            Action::await_change(),
+            "no deadline -> await change"
+        );
+        sb.spec.lifecycle.shutdown_time = Some(Time("2999-01-01T00:00:00Z".parse().unwrap()));
+        assert_ne!(
+            running_action(&sb),
+            Action::await_change(),
+            "deadline -> requeue so expiry fires on time"
+        );
     }
 
     #[test]
