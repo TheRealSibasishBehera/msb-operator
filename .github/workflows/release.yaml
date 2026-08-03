@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  install-manifests:
+    name: bundle install manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+
+      - name: Render bundles
+        run: |
+          kubectl kustomize deploy/ > msb-operator.yaml
+          kubectl kustomize deploy/gateway/ > msb-operator-gateway.yaml
+
+      # Image tags are bumped in a release-prep commit before the tag; fail if they drifted.
+      - name: Verify the bundle is pinned to the release tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -q "msb-controller:${version}" msb-operator.yaml; then
+            echo "Bundle image tag does not match release ${GITHUB_REF_NAME}."
+            echo "Bump the image tags in deploy/ before tagging."
+            grep "image: ghcr" msb-operator.yaml
+            exit 1
+          fi
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            msb-operator.yaml
+            msb-operator-gateway.yaml
