@@ -10,20 +10,20 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use kube::api::{DeleteParams, ObjectMeta, PostParams};
 use kube::Api;
+use kube::api::{DeleteParams, ObjectMeta, PostParams};
 use microsandbox_types::CloudCreateSandboxRequest;
 use msb_crd::{Sandbox, SandboxPhase};
 use serde::Deserialize;
 use tracing::warn;
 
+use crate::AppState;
 use crate::error::GatewayError;
 use crate::lifecycle::convert;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateQuery {
@@ -142,8 +142,10 @@ pub async fn create(
         }
         // Equal jitter so concurrent creates don't align their polls on the API server.
         let half = poll / 2;
-        tokio::time::sleep(half + Duration::from_millis(fastrand::u64(0..=half.as_millis() as u64)))
-            .await;
+        tokio::time::sleep(
+            half + Duration::from_millis(fastrand::u64(0..=half.as_millis() as u64)),
+        )
+        .await;
         poll = (poll * 2).min(POLL_MAX);
     }
 }

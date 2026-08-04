@@ -9,15 +9,15 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::io::AsyncBufReadExt as _;
 use futures::{Stream, StreamExt};
-use kube::api::LogParams;
-use kube::Api;
 use k8s_openapi::api::core::v1::Pod;
+use kube::Api;
+use kube::api::LogParams;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::AppState;
 use crate::auth;
 use crate::error::GatewayError;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 struct ConsoleLogLine {
@@ -169,7 +169,8 @@ mod tests {
 
     #[tokio::test]
     async fn sse_stream_skips_malformed_lines_without_crashing() {
-        let input = "not json\n{\"source\":\"stdout\",\"ts\":\"2026-01-01T00:00:00Z\",\"text\":\"ok\"}\n";
+        let input =
+            "not json\n{\"source\":\"stdout\",\"ts\":\"2026-01-01T00:00:00Z\",\"text\":\"ok\"}\n";
         let reader = futures::io::Cursor::new(input.as_bytes().to_vec());
         let events: Vec<_> = sse_stream(reader).collect().await;
         assert_eq!(events.len(), 2);

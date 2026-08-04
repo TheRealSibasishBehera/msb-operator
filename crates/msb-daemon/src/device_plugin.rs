@@ -219,10 +219,7 @@ async fn wait_for_kubelet_restart(kubelet_sock: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run(
-    health_rx: watch::Receiver<bool>,
-    cache_host_path: PathBuf,
-) -> anyhow::Result<()> {
+pub async fn run(health_rx: watch::Receiver<bool>, cache_host_path: PathBuf) -> anyhow::Result<()> {
     loop {
         let socket_path = PathBuf::from(PLUGIN_DIR).join(PLUGIN_SOCKET_NAME);
 

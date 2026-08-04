@@ -123,9 +123,18 @@ mod tests {
     fn reserved_port_conflict_catches_bridge_ports_only() {
         use crate::pod::test_support::{config, sandbox_with_ports};
         let cfg = config();
-        assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[8080]), &cfg), Some(8080));
-        assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[7000]), &cfg), Some(7000));
-        assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[9090]), &cfg), None);
+        assert_eq!(
+            reserved_port_conflict(&sandbox_with_ports(&[8080]), &cfg),
+            Some(8080)
+        );
+        assert_eq!(
+            reserved_port_conflict(&sandbox_with_ports(&[7000]), &cfg),
+            Some(7000)
+        );
+        assert_eq!(
+            reserved_port_conflict(&sandbox_with_ports(&[9090]), &cfg),
+            None
+        );
         assert_eq!(reserved_port_conflict(&sandbox_with_ports(&[]), &cfg), None);
     }
 

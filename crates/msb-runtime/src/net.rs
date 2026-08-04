@@ -26,14 +26,20 @@ pub fn apply(
         .dns
         .nameservers
         .iter()
-        .map(|s| s.parse::<Nameserver>().with_context(|| format!("dns nameserver {s:?}")))
+        .map(|s| {
+            s.parse::<Nameserver>()
+                .with_context(|| format!("dns nameserver {s:?}"))
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     Ok(builder.network(move |mut n| {
         n = n.enabled(net.enabled).policy(policy(&net.policy.preset));
 
         for p in &net.published_ports {
-            let bind: IpAddr = p.host_bind.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            let bind: IpAddr = p
+                .host_bind
+                .parse()
+                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
             let (host, guest) = (p.host_port(), p.guest_port);
             n = match p.protocol {
                 PortProtocol::Tcp => n.port_bind(bind, host, guest),

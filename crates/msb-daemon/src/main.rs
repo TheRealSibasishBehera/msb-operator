@@ -34,7 +34,11 @@ struct DevicePluginArgs {
     kvm_path: PathBuf,
 
     /// Host cache dir, injected read-only into each sandbox alongside /dev/kvm.
-    #[arg(long, default_value = "/var/lib/msb/cache", env = "MSB_CACHE_HOST_PATH")]
+    #[arg(
+        long,
+        default_value = "/var/lib/msb/cache",
+        env = "MSB_CACHE_HOST_PATH"
+    )]
     cache_host_path: PathBuf,
 
     /// This node's name (downward API), for the node-scoped sandbox-pod watch.
@@ -91,11 +95,9 @@ async fn main() -> anyhow::Result<()> {
             )?;
             Ok(())
         }
-        Commands::Pull(args) => {
-            pull::pull(&args.msb_path, &args.msb_home, &args.image)
-                .await
-                .context("pulling image")
-        }
+        Commands::Pull(args) => pull::pull(&args.msb_path, &args.msb_home, &args.image)
+            .await
+            .context("pulling image"),
     }
 }
 
@@ -103,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
 fn open_kvm_for_all(kvm_path: &std::path::Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let meta = std::fs::metadata(kvm_path)
-        .with_context(|| format!("stat {}", kvm_path.display()))?;
+    let meta =
+        std::fs::metadata(kvm_path).with_context(|| format!("stat {}", kvm_path.display()))?;
     let mode = meta.permissions().mode();
     let relaxed = mode | 0o006;
     if relaxed == mode {

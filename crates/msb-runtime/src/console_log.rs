@@ -36,7 +36,9 @@ fn format_line(entry: &LogEntry) -> String {
     let line = ConsoleLogLine {
         source: source_str(entry.source),
         ts: entry.timestamp,
-        text: String::from_utf8_lossy(&entry.data).trim_end_matches('\n').to_string(),
+        text: String::from_utf8_lossy(&entry.data)
+            .trim_end_matches('\n')
+            .to_string(),
     };
     serde_json::to_string(&line).expect("console log line always serializes")
 }

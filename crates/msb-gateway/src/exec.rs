@@ -5,11 +5,11 @@
 
 use std::time::Duration;
 
-use backon::{ExponentialBuilder, Retryable};
 use axum::extract::ws::{Message as AxumMsg, WebSocket};
+use backon::{ExponentialBuilder, Retryable};
 use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as TungMsg;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, warn};
 
 use crate::error::GatewayError;
@@ -114,9 +114,7 @@ async fn dial_bridge_with_retry(
     bridge_url: &str,
     cfg: SpliceConfig,
 ) -> Result<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     GatewayError,
 > {
     // Bounded by wall-clock, not attempts: the budget is client patience, which
@@ -146,22 +144,23 @@ async fn dial_bridge_with_retry(
 
     match tokio::time::timeout(DEADLINE, dial.retry(policy).sleep(tokio::time::sleep)).await {
         Ok(Ok(bridge)) => Ok(bridge),
-        Ok(Err(e)) => Err(GatewayError::Bridge(format!("dial {bridge_url} failed: {e}"))),
+        Ok(Err(e)) => Err(GatewayError::Bridge(format!(
+            "dial {bridge_url} failed: {e}"
+        ))),
         Err(_) => Err(GatewayError::Bridge(format!(
             "dial {bridge_url} not ready within {DEADLINE:?}"
         ))),
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::ws::WebSocketUpgrade;
+    use axum::Router;
     use axum::extract::State;
+    use axum::extract::ws::WebSocketUpgrade;
     use axum::response::Response;
     use axum::routing::get;
-    use axum::Router;
     use std::sync::Arc;
     use tokio_tungstenite::tungstenite::Message as TungMsg;
 
@@ -186,7 +185,9 @@ mod tests {
         let app = Router::new()
             .route("/ws", get(gateway_route))
             .with_state(Arc::new(bridge_url));
-        let gw = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let gw = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = gw.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(gw, app).await.unwrap() });
         port
@@ -194,7 +195,9 @@ mod tests {
 
     // A bridge that sends a prologue on connect, then echoes what it receives.
     async fn echo_bridge(port_tx: tokio::sync::oneshot::Sender<u16>, prologue: Vec<u8>) {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         port_tx.send(listener.local_addr().unwrap().port()).unwrap();
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
@@ -233,7 +236,9 @@ mod tests {
     }
 
     async fn silent_bridge(port_tx: tokio::sync::oneshot::Sender<u16>) {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         port_tx.send(listener.local_addr().unwrap().port()).unwrap();
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
@@ -241,10 +246,7 @@ mod tests {
         while let Some(Ok(_)) = ws.next().await {}
     }
 
-    async fn capped_route(
-        State(bridge_url): State<Arc<String>>,
-        ws: WebSocketUpgrade,
-    ) -> Response {
+    async fn capped_route(State(bridge_url): State<Arc<String>>, ws: WebSocketUpgrade) -> Response {
         let bridge_url = bridge_url.clone();
         ws.on_upgrade(move |socket| async move {
             let cfg = SpliceConfig {
@@ -264,7 +266,9 @@ mod tests {
         let app = Router::new()
             .route("/ws", get(capped_route))
             .with_state(Arc::new(bridge_url));
-        let gw = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let gw = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let gw_port = gw.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(gw, app).await.unwrap() });
 
@@ -281,6 +285,10 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(closed, Ok(true), "session ceiling did not tear down the session");
+        assert_eq!(
+            closed,
+            Ok(true),
+            "session ceiling did not tear down the session"
+        );
     }
 }

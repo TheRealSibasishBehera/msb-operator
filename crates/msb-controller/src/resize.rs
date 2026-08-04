@@ -81,7 +81,8 @@ pub async fn apply(
         });
     }
 
-    let reply: serde_json::Value = serde_json::from_str(&body).map_err(ResizeError::InvalidReply)?;
+    let reply: serde_json::Value =
+        serde_json::from_str(&body).map_err(ResizeError::InvalidReply)?;
     if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         let error = reply
             .get("error")

@@ -433,10 +433,7 @@ mod tests {
         let rejected = |mutate: fn(&mut CloudSandboxSpec)| {
             let mut r = req();
             mutate(&mut r.spec);
-            matches!(
-                request_to_spec(&r),
-                Err(GatewayError::InvalidRequest(_))
-            )
+            matches!(request_to_spec(&r), Err(GatewayError::InvalidRequest(_)))
         };
         assert!(rejected(|s| s.network.enabled = false));
         assert!(rejected(|s| s.network.max_connections = Some(10)));
@@ -635,6 +632,12 @@ mod tests {
         let projected: CloudSandboxSpec =
             serde_json::from_value(cloud.spec.expect("projection present")).unwrap();
         assert_eq!(projected.runtime.workdir.as_deref(), Some("/app"));
-        assert_eq!(projected.env, vec![EnvVar { key: "K".into(), value: "V".into() }]);
+        assert_eq!(
+            projected.env,
+            vec![EnvVar {
+                key: "K".into(),
+                value: "V".into()
+            }]
+        );
     }
 }

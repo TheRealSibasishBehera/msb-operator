@@ -23,12 +23,12 @@ mod resolve;
 
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use clap::Parser;
 use kube::Client;
 use tracing::{error, info};
@@ -49,7 +49,11 @@ struct Cli {
     create_timeout_secs: u64,
 
     /// Max concurrent exec sessions per identity (0 = unlimited).
-    #[arg(long, env = "MSB_GATEWAY_MAX_SESSIONS_PER_IDENTITY", default_value_t = 16)]
+    #[arg(
+        long,
+        env = "MSB_GATEWAY_MAX_SESSIONS_PER_IDENTITY",
+        default_value_t = 16
+    )]
     max_sessions_per_identity: usize,
 
     /// Reject any single WS frame larger than this many bytes. Default 64 MiB —
@@ -88,7 +92,8 @@ async fn main() -> anyhow::Result<()> {
         limiter: ConnLimiter::new(cli.max_sessions_per_identity),
         splice_cfg: SpliceConfig {
             max_frame_bytes: cli.max_frame_bytes,
-            max_session: (cli.max_session_secs > 0).then(|| Duration::from_secs(cli.max_session_secs)),
+            max_session: (cli.max_session_secs > 0)
+                .then(|| Duration::from_secs(cli.max_session_secs)),
         },
         create_timeout: Duration::from_secs(cli.create_timeout_secs),
     };

@@ -1,9 +1,9 @@
 //! Gateway errors, mapped to the typed codes + HTTP status the SDK's CloudBackend
 //! recognises (`sandbox_not_found`, `name_already_exists`, `invalid_request`, ...).
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {

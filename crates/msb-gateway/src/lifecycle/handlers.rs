@@ -1,20 +1,20 @@
 //! The lifecycle REST handlers: get / list / delete / stop / start. Each auths,
 //! performs the CRD op, and maps to the cloud wire type.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
 use kube::Api;
+use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
 use microsandbox_types::{CloudMessageResponse, CloudPaginated};
 use msb_crd::Sandbox;
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::auth::{self, Identity};
 use crate::error::GatewayError;
 use crate::lifecycle::convert;
-use crate::AppState;
 
 // bearer -> identity (namespace derived from the token) -> SAR for `verb`.
 async fn authed(
@@ -87,7 +87,11 @@ pub async fn list(
                 .map(|sb| convert::sandbox_to_cloud(sb, &id.namespace))
                 .collect::<Vec<_>>();
             // V1: one page, no cursor.
-            Json(CloudPaginated { data, next_cursor: None }).into_response()
+            Json(CloudPaginated {
+                data,
+                next_cursor: None,
+            })
+            .into_response()
         }
         Err(e) => GatewayError::Kube(e).into_response(),
     }
@@ -103,7 +107,10 @@ pub async fn delete(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    match api(&state, &id.namespace).delete(&name, &DeleteParams::default()).await {
+    match api(&state, &id.namespace)
+        .delete(&name, &DeleteParams::default())
+        .await
+    {
         Ok(_) => Json(CloudMessageResponse {
             message: format!("sandbox {name} deleted"),
         })

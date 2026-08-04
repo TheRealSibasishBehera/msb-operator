@@ -864,7 +864,10 @@ async fn mark_port_conflict(
     let message = format!(
         "publishedPort {port} collides with a reserved bridge port; choose a different hostPort"
     );
-    if sandbox.status.as_ref().and_then(|s| s.termination_reason.as_ref())
+    if sandbox
+        .status
+        .as_ref()
+        .and_then(|s| s.termination_reason.as_ref())
         == Some(&TerminationReason::Failed)
         && sandbox.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&SandboxPhase::Failed)
     {

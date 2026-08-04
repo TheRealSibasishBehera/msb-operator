@@ -62,22 +62,18 @@ pub fn namespace_from_username(username: &str) -> Result<String, GatewayError> {
 }
 
 /// Authenticate + derive namespace, but authorize nothing — call `authorize_verb`.
-pub async fn authenticate_identity(
-    client: &Client,
-    token: &str,
-) -> Result<Identity, GatewayError> {
+pub async fn authenticate_identity(client: &Client, token: &str) -> Result<Identity, GatewayError> {
     let username = authenticate(client, token).await?;
     let namespace = namespace_from_username(&username)?;
-    Ok(Identity { username, namespace })
+    Ok(Identity {
+        username,
+        namespace,
+    })
 }
 
 /// Full check for the exec path: authenticate, derive namespace, authorize `get`
 /// on the named sandbox. Returns the identity (namespace + username).
-pub async fn authorize(
-    client: &Client,
-    token: &str,
-    name: &str,
-) -> Result<Identity, GatewayError> {
+pub async fn authorize(client: &Client, token: &str, name: &str) -> Result<Identity, GatewayError> {
     let id = authenticate_identity(client, token).await?;
     authorize_verb(client, &id, "get", Some(name)).await?;
     Ok(id)
@@ -102,7 +98,9 @@ async fn authenticate(client: &Client, token: &str) -> Result<String, GatewayErr
         .status
         .ok_or_else(|| GatewayError::Unauthorized("token review returned no status".into()))?;
     if !status.authenticated.unwrap_or(false) {
-        let msg = status.error.unwrap_or_else(|| "token not authenticated".into());
+        let msg = status
+            .error
+            .unwrap_or_else(|| "token not authenticated".into());
         return Err(GatewayError::Unauthorized(msg));
     }
     status

@@ -60,7 +60,11 @@ async fn main() -> Result<()> {
     // succeeded (the sandbox is up and reachable).
     let ready = Arc::new(AtomicBool::new(false));
 
-    tokio::spawn(serve_health(cli.health_port, ready.clone(), control_sock_path));
+    tokio::spawn(serve_health(
+        cli.health_port,
+        ready.clone(),
+        control_sock_path,
+    ));
 
     let listener = TcpListener::bind(("0.0.0.0", cli.port))
         .await
@@ -198,13 +202,17 @@ async fn control(
 /// Relays one control request line verbatim to `<sandbox>.control.sock` and
 /// returns its reply. A dumb pipe: the bridge never parses `ControlRequest`/
 /// `ControlResponse`, so it stays correct across control-protocol versions.
-async fn relay_control(control_sock_path: &std::path::Path, body: &[u8]) -> (axum::http::StatusCode, Vec<u8>) {
+async fn relay_control(
+    control_sock_path: &std::path::Path,
+    body: &[u8],
+) -> (axum::http::StatusCode, Vec<u8>) {
     let mut sock = match tokio::net::UnixStream::connect(control_sock_path).await {
         Ok(s) => s,
         Err(e) => {
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                format!("{{\"ok\":false,\"error\":\"control socket unreachable: {e}\"}}").into_bytes(),
+                format!("{{\"ok\":false,\"error\":\"control socket unreachable: {e}\"}}")
+                    .into_bytes(),
             );
         }
     };
@@ -234,7 +242,8 @@ async fn relay_control(control_sock_path: &std::path::Path, body: &[u8]) -> (axu
             Err(e) => {
                 return (
                     axum::http::StatusCode::BAD_GATEWAY,
-                    format!("{{\"ok\":false,\"error\":\"reading control reply: {e}\"}}").into_bytes(),
+                    format!("{{\"ok\":false,\"error\":\"reading control reply: {e}\"}}")
+                        .into_bytes(),
                 );
             }
         }
@@ -332,7 +341,8 @@ mod tests {
     }
 
     fn test_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("msb-bridge-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("msb-bridge-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -347,8 +357,7 @@ mod tests {
         tokio::spawn(fake_control_socket(sock_path.clone(), reply));
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let (status, body) =
-            relay_control(&sock_path, br#"{"op":"cpu_target","online":2}"#).await;
+        let (status, body) = relay_control(&sock_path, br#"{"op":"cpu_target","online":2}"#).await;
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(body, reply);
 
