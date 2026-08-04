@@ -98,9 +98,8 @@ fn generate_rbac() -> Result<()> {
 fn generate_crd() -> Result<()> {
     let mut crd = Sandbox::crd();
 
-    // Seal every spec field except the mutable allowlist. kube-derive can't emit CEL
-    // transition rules, so inject a `self == oldSelf` rule per field. `oldSelf` binds
-    // only on update, so these seal after creation and are skipped on create.
+    // Seal every spec field outside the allowlist. The rule keys on presence and
+    // value so an optional field absent at creation cannot be added later.
     const MUTABLE_FIELDS: &[&str] = &["desiredState", "cpus", "memory", "lifecycle"];
 
     for version in &mut crd.spec.versions {
@@ -132,21 +131,26 @@ fn generate_crd() -> Result<()> {
                 },
             ]);
 
-        let Some(fields) = spec.properties.as_mut() else {
-            continue;
-        };
-        for (name, field) in fields.iter_mut() {
-            if MUTABLE_FIELDS.contains(&name.as_str()) {
-                continue;
-            }
-            field
-                .x_kubernetes_validations
-                .get_or_insert_with(Vec::new)
-                .push(ValidationRule {
-                    rule: "self == oldSelf".to_string(),
-                    message: Some(format!("spec.{name} is immutable after creation")),
-                    ..Default::default()
-                });
+        let sealed: Vec<String> = spec
+            .properties
+            .as_ref()
+            .map(|fields| {
+                fields
+                    .keys()
+                    .filter(|name| !MUTABLE_FIELDS.contains(&name.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rules = spec.x_kubernetes_validations.get_or_insert_with(Vec::new);
+        for name in sealed {
+            rules.push(ValidationRule {
+                rule: format!(
+                    "has(oldSelf.{name}) == has(self.{name}) && (!has(self.{name}) || self.{name} == oldSelf.{name})"
+                ),
+                message: Some(format!("spec.{name} is immutable after creation")),
+                ..Default::default()
+            });
         }
 
         // `status.conditions` is a standard `metav1.Condition` list. schemars can't

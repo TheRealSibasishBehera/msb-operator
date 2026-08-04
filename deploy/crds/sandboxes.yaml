@@ -50,9 +50,6 @@ spec:
                 items:
                   type: string
                 type: array
-                x-kubernetes-validations:
-                - message: spec.cmd is immutable after creation
-                  rule: self == oldSelf
               cpus:
                 default: 1
                 description: |-
@@ -77,9 +74,6 @@ spec:
                 items:
                   type: string
                 type: array
-                x-kubernetes-validations:
-                - message: spec.entrypoint is immutable after creation
-                  rule: self == oldSelf
               env:
                 description: Plain (non-secret) environment variables set in the guest. This field is immutable.
                 items:
@@ -94,31 +88,19 @@ spec:
                   - value
                   type: object
                 type: array
-                x-kubernetes-validations:
-                - message: spec.env is immutable after creation
-                  rule: self == oldSelf
               hostname:
                 description: Guest hostname. This field is immutable.
                 nullable: true
                 type: string
-                x-kubernetes-validations:
-                - message: spec.hostname is immutable after creation
-                  rule: self == oldSelf
               idleTimeoutSecs:
                 description: Stop the sandbox after this many seconds with no activity. This field is immutable.
                 format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer
-                x-kubernetes-validations:
-                - message: spec.idleTimeoutSecs is immutable after creation
-                  rule: self == oldSelf
               image:
                 description: OCI image for the guest root filesystem. This field is immutable.
                 type: string
-                x-kubernetes-validations:
-                - message: spec.image is immutable after creation
-                  rule: self == oldSelf
               lifecycle:
                 default:
                   shutdownPolicy: Retain
@@ -152,9 +134,6 @@ spec:
                     default: false
                     type: boolean
                 type: object
-                x-kubernetes-validations:
-                - message: spec.logging is immutable after creation
-                  rule: self == oldSelf
               maxCpus:
                 description: |-
                   Boot-time vCPU ceiling. Unset defaults to `cpus` (no live-resize headroom).
@@ -164,18 +143,12 @@ spec:
                 minimum: 0.0
                 nullable: true
                 type: integer
-                x-kubernetes-validations:
-                - message: spec.maxCpus is immutable after creation
-                  rule: self == oldSelf
               maxDurationSecs:
                 description: Hard cap on total sandbox lifetime, in seconds. This field is immutable.
                 format: uint64
                 minimum: 0.0
                 nullable: true
                 type: integer
-                x-kubernetes-validations:
-                - message: spec.maxDurationSecs is immutable after creation
-                  rule: self == oldSelf
               maxMemory:
                 description: |-
                   Boot-time memory ceiling in MiB. Unset defaults to `memory` (no
@@ -186,9 +159,6 @@ spec:
                 minimum: 0.0
                 nullable: true
                 type: integer
-                x-kubernetes-validations:
-                - message: spec.maxMemory is immutable after creation
-                  rule: self == oldSelf
               memory:
                 default: 512
                 description: |-
@@ -311,9 +281,6 @@ spec:
                     description: Copy host trusted CAs into the guest.
                     type: boolean
                 type: object
-                x-kubernetes-validations:
-                - message: spec.network is immutable after creation
-                  rule: self == oldSelf
               rlimits:
                 description: POSIX resource limits applied to guest processes at agentd startup. This field is immutable.
                 items:
@@ -355,9 +322,6 @@ spec:
                   - soft
                   type: object
                 type: array
-                x-kubernetes-validations:
-                - message: spec.rlimits is immutable after creation
-                  rule: self == oldSelf
               runPolicy:
                 default: Once
                 description: Restart policy on failure. This field is immutable.
@@ -365,9 +329,6 @@ spec:
                 - Once
                 - RerunOnFailure
                 type: string
-                x-kubernetes-validations:
-                - message: spec.runPolicy is immutable after creation
-                  rule: self == oldSelf
               secrets:
                 description: Secrets injected as env vars inside the guest via the smoltcp proxy. This field is immutable.
                 items:
@@ -401,9 +362,6 @@ spec:
                   - valueFrom
                   type: object
                 type: array
-                x-kubernetes-validations:
-                - message: spec.secrets is immutable after creation
-                  rule: self == oldSelf
               securityProfile:
                 default: Default
                 description: In-guest hardening applied to exec sessions. This field is immutable.
@@ -411,16 +369,10 @@ spec:
                 - Default
                 - Restricted
                 type: string
-                x-kubernetes-validations:
-                - message: spec.securityProfile is immutable after creation
-                  rule: self == oldSelf
               shell:
                 description: Default shell for guest sessions. This field is immutable.
                 nullable: true
                 type: string
-                x-kubernetes-validations:
-                - message: spec.shell is immutable after creation
-                  rule: self == oldSelf
               upper:
                 default:
                   size: 4Gi
@@ -434,23 +386,14 @@ spec:
                     nullable: true
                     x-kubernetes-int-or-string: true
                 type: object
-                x-kubernetes-validations:
-                - message: spec.upper is immutable after creation
-                  rule: self == oldSelf
               user:
                 description: User the guest workload runs as (name, uid, or `uid:gid`). This field is immutable.
                 nullable: true
                 type: string
-                x-kubernetes-validations:
-                - message: spec.user is immutable after creation
-                  rule: self == oldSelf
               workdir:
                 description: Working directory for guest commands. This field is immutable.
                 nullable: true
                 type: string
-                x-kubernetes-validations:
-                - message: spec.workdir is immutable after creation
-                  rule: self == oldSelf
             required:
             - image
             type: object
@@ -459,6 +402,44 @@ spec:
               rule: 'self.cpus <= (has(self.maxCpus) ? self.maxCpus : self.cpus)'
             - message: spec.memory must not exceed spec.maxMemory
               rule: 'self.memory <= (has(self.maxMemory) ? self.maxMemory : self.memory)'
+            - message: spec.cmd is immutable after creation
+              rule: has(oldSelf.cmd) == has(self.cmd) && (!has(self.cmd) || self.cmd == oldSelf.cmd)
+            - message: spec.entrypoint is immutable after creation
+              rule: has(oldSelf.entrypoint) == has(self.entrypoint) && (!has(self.entrypoint) || self.entrypoint == oldSelf.entrypoint)
+            - message: spec.env is immutable after creation
+              rule: has(oldSelf.env) == has(self.env) && (!has(self.env) || self.env == oldSelf.env)
+            - message: spec.hostname is immutable after creation
+              rule: has(oldSelf.hostname) == has(self.hostname) && (!has(self.hostname) || self.hostname == oldSelf.hostname)
+            - message: spec.idleTimeoutSecs is immutable after creation
+              rule: has(oldSelf.idleTimeoutSecs) == has(self.idleTimeoutSecs) && (!has(self.idleTimeoutSecs) || self.idleTimeoutSecs == oldSelf.idleTimeoutSecs)
+            - message: spec.image is immutable after creation
+              rule: has(oldSelf.image) == has(self.image) && (!has(self.image) || self.image == oldSelf.image)
+            - message: spec.logging is immutable after creation
+              rule: has(oldSelf.logging) == has(self.logging) && (!has(self.logging) || self.logging == oldSelf.logging)
+            - message: spec.maxCpus is immutable after creation
+              rule: has(oldSelf.maxCpus) == has(self.maxCpus) && (!has(self.maxCpus) || self.maxCpus == oldSelf.maxCpus)
+            - message: spec.maxDurationSecs is immutable after creation
+              rule: has(oldSelf.maxDurationSecs) == has(self.maxDurationSecs) && (!has(self.maxDurationSecs) || self.maxDurationSecs == oldSelf.maxDurationSecs)
+            - message: spec.maxMemory is immutable after creation
+              rule: has(oldSelf.maxMemory) == has(self.maxMemory) && (!has(self.maxMemory) || self.maxMemory == oldSelf.maxMemory)
+            - message: spec.network is immutable after creation
+              rule: has(oldSelf.network) == has(self.network) && (!has(self.network) || self.network == oldSelf.network)
+            - message: spec.rlimits is immutable after creation
+              rule: has(oldSelf.rlimits) == has(self.rlimits) && (!has(self.rlimits) || self.rlimits == oldSelf.rlimits)
+            - message: spec.runPolicy is immutable after creation
+              rule: has(oldSelf.runPolicy) == has(self.runPolicy) && (!has(self.runPolicy) || self.runPolicy == oldSelf.runPolicy)
+            - message: spec.secrets is immutable after creation
+              rule: has(oldSelf.secrets) == has(self.secrets) && (!has(self.secrets) || self.secrets == oldSelf.secrets)
+            - message: spec.securityProfile is immutable after creation
+              rule: has(oldSelf.securityProfile) == has(self.securityProfile) && (!has(self.securityProfile) || self.securityProfile == oldSelf.securityProfile)
+            - message: spec.shell is immutable after creation
+              rule: has(oldSelf.shell) == has(self.shell) && (!has(self.shell) || self.shell == oldSelf.shell)
+            - message: spec.upper is immutable after creation
+              rule: has(oldSelf.upper) == has(self.upper) && (!has(self.upper) || self.upper == oldSelf.upper)
+            - message: spec.user is immutable after creation
+              rule: has(oldSelf.user) == has(self.user) && (!has(self.user) || self.user == oldSelf.user)
+            - message: spec.workdir is immutable after creation
+              rule: has(oldSelf.workdir) == has(self.workdir) && (!has(self.workdir) || self.workdir == oldSelf.workdir)
           status:
             nullable: true
             properties:
