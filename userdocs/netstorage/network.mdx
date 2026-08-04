@@ -1,0 +1,107 @@
+---
+title: Network policy
+description: Egress policy, DNS, and TLS interception for the guest
+icon: "shield-halved"
+---
+
+A sandbox's outbound network goes through an in-guest proxy (msb's smoltcp
+stack). `spec.network` configures that proxy: which destinations the guest may
+reach, how DNS resolves, and whether TLS is intercepted.
+
+<Note>
+  The precise effect of each policy preset and of TLS interception is being
+  finalized against the running operator. The fields, defaults, and verification
+  commands below are accurate; where a preset's exact reachability rule is marked
+  _to confirm_, treat it as indicative until this note is removed.
+</Note>
+
+## Egress policy
+
+`spec.network.policy.preset` selects an egress policy. Default `publicOnly`.
+
+| Preset | Intended effect (to confirm) |
+| --- | --- |
+| `publicOnly` | Reach public internet destinations; block cluster-internal/private ranges. |
+| `allowAll` | No egress restriction. |
+| `denyAll` | Block all outbound network. |
+| `nonLocal` | Reach off-node destinations; block node-local. |
+
+```yaml
+spec:
+  network:
+    policy:
+      preset: denyAll
+```
+
+**Verify** (needs the gateway to exec):
+
+```python
+# denyAll: an outbound request should fail; allowAll: it should succeed.
+out = await sb.exec("sh", ["-c", "wget -qO- https://example.com || echo BLOCKED"])
+print(out.stdout_text)
+```
+
+Run the same probe under each preset and compare — that is the acceptance test
+that pins down the exact rule for each value.
+
+## Disabling networking
+
+Set `spec.network.enabled: false` to turn the proxy off entirely — the guest gets
+no outbound network.
+
+```yaml
+spec:
+  network:
+    enabled: false
+```
+
+**Verify:** any outbound request from the guest fails.
+
+## Connection limit
+
+`spec.network.maxConnections` caps concurrent guest TCP connections. Default
+`256`.
+
+## DNS
+
+`spec.network.dns` controls resolution inside the guest.
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `nameservers` | — | Resolvers the guest uses. |
+| `queryTimeoutMs` | `5000` | Per-query timeout. |
+| `rebindProtection` | `true` | Reject responses that resolve public names to private IPs (DNS-rebinding guard). |
+
+```yaml
+spec:
+  network:
+    dns:
+      nameservers: ["1.1.1.1"]
+```
+
+**Verify:** `exec` a name lookup and confirm it uses the configured resolver.
+
+## TLS interception
+
+`spec.network.tls.intercept` (default `false`) lets the proxy terminate and
+inspect TLS on the listed `interceptedPorts`. This is what makes secret
+substitution into HTTPS requests possible (see [Secrets and env](/netstorage/secrets-and-env)).
+
+```yaml
+spec:
+  network:
+    tls:
+      intercept: true
+      interceptedPorts:
+        - port: 443
+```
+
+<Note>
+  The observable effect of interception (certificate behavior seen by the guest,
+  which ports are affected) is being finalized at execution.
+</Note>
+
+## Trusting host CAs
+
+`spec.network.trustHostCas` (default `false`) copies the host's trusted CA bundle
+into the guest, so the guest trusts the same authorities the node does.

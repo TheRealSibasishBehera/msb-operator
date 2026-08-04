@@ -1,0 +1,39 @@
+---
+title: Introduction
+description: Run microsandbox sandboxes as a Kubernetes resource
+icon: "circle-info"
+---
+
+The msb-operator runs [microsandbox](https://microsandbox.dev) microVMs as a
+Kubernetes resource: a `Sandbox`. You declare one like a `Deployment`, and the
+operator schedules and runs a hardware-isolated microVM to back it.
+
+Each sandbox is a real virtual machine (its own kernel, filesystem, and network),
+which makes it a strong boundary for running untrusted or AI-generated code in a
+cluster.
+
+## Features
+
+- **Declarative lifecycle**: `spec.desiredState` starts and stops a sandbox;
+  `runPolicy` decides what happens when it exits.
+- **Your SDK, unchanged**: point `MSB_API_URL` at the [gateway](/workloads/accessing-sandboxes)
+  and your existing microsandbox SDK code drives the cluster.
+- **Live resize**: grow a running sandbox's CPU and memory in place.
+- **Kubernetes-native**: Secrets, Services, labels, RBAC, and quotas apply to
+  sandboxes the way they apply to Pods.
+
+## Requirements
+
+Sandboxes run only on nodes with KVM (`/dev/kvm`), and the operator needs a
+privileged namespace of its own. See [Requirements](/install/requirements).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/getting-started/quickstart">
+    Empty cluster to a running sandbox.
+  </Card>
+  <Card title="Sandbox and Kubernetes" icon="diagram-project" href="/getting-started/sandbox-and-kubernetes">
+    How a Sandbox maps to Kubernetes objects.
+  </Card>
+</CardGroup>

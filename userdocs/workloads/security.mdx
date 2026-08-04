@@ -1,0 +1,64 @@
+---
+title: Security and limits
+description: In-guest hardening and POSIX resource limits
+icon: "lock"
+---
+
+Two spec fields harden what runs inside the guest: `securityProfile` tightens
+exec sessions, and `rlimits` caps per-process resources. Both are immutable.
+
+## Security profile
+
+`spec.securityProfile` selects the hardening applied to exec sessions inside the
+guest. Default `Default`.
+
+| Value | Intended effect (to confirm) |
+| --- | --- |
+| `Default` | Standard exec environment. |
+| `Restricted` | A hardened exec environment (tighter capabilities/limits on guest sessions). |
+
+```yaml
+spec:
+  securityProfile: Restricted
+```
+
+<Note>
+  The exact set of restrictions `Restricted` applies is being finalized against
+  the running operator. Verify by exec'ing the same probes under `Default` and
+  `Restricted` and diffing what each allows.
+</Note>
+
+**Verify** (needs the gateway to exec):
+
+```python
+out = await sb.exec("sh", ["-c", "id; capsh --print 2>/dev/null; ulimit -a"])
+print(out.stdout_text)
+```
+
+## Resource limits
+
+`spec.rlimits` sets POSIX `setrlimit` limits on guest processes. Each entry names
+a `resource`, a `soft` limit, and a `hard` ceiling; a process may raise its soft
+limit up to the hard ceiling.
+
+```yaml
+spec:
+  rlimits:
+    - resource: Nofile   # max open file descriptors
+      soft: 1024
+      hard: 4096
+    - resource: Nproc    # max processes
+      soft: 256
+      hard: 256
+```
+
+Available `resource` values: `Cpu`, `Fsize`, `Data`, `Stack`, `Core`, `Rss`,
+`Nproc`, `Nofile`, `Memlock`, `As`, `Locks`, `Sigpending`, `Msgqueue`, `Nice`,
+`Rtprio`, `Rttime` (the standard `RLIMIT_*` set).
+
+**Verify** — exec `ulimit` and confirm the guest sees the configured values:
+
+```python
+out = await sb.exec("sh", ["-c", "ulimit -n; ulimit -u"])
+print(out.stdout_text)   # expect 1024 and 256 for the example above
+```

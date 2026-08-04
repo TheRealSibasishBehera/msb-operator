@@ -1,0 +1,38 @@
+---
+title: Accessing sandboxes
+description: Reach a running sandbox with the SDK
+icon: "plug"
+---
+
+Run commands in a sandbox with the microsandbox SDK through the gateway.
+
+<Note>
+  Running a command inside the guest requires the gateway. `kubectl exec` reaches
+  the pod's runtime container, not the guest microVM, so it is not a way in.
+  Without the gateway you can still reach a sandbox over its published ports and
+  read its console logs, but not exec into it.
+</Note>
+
+The gateway speaks msb's cloud API, so your existing SDK code drives the cluster
+with no changes. Point it at the gateway and give it a Kubernetes token:
+
+```bash
+export MSB_API_URL=http://msb-gateway.msb-system.svc:8080
+export MSB_API_KEY=$(kubectl create token my-sa -n my-namespace)
+```
+
+```python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create("agent-run-42", image="python")
+output = await sb.exec("python", ["-c", "print(2 + 2)"])
+print(output.stdout_text)
+```
+
+The token's namespace is where your sandboxes live. The gateway is opt-in; see
+[Enable the gateway](/install/gateway).
+
+## Reaching a network service
+
+If the sandbox runs a server, publish its port and reach it through the sandbox's
+Service. See [Ports and Services](/netstorage/ports-and-services).

@@ -1,0 +1,74 @@
+---
+title: Enable the gateway
+description: Turn on the SDK-compatible gateway
+icon: "server"
+---
+
+The gateway speaks msb's cloud API, so an unmodified microsandbox SDK drives the cluster. It is opt-in and ships as a separate bundle. Install it after the operator:
+
+```bash
+kubectl apply -f https://github.com/TheRealSibasishBehera/msb-operator/releases/latest/download/msb-operator-gateway.yaml
+```
+
+This deploys the gateway and a ClusterIP Service named `msb-gateway` on port `8080`:
+
+```bash
+kubectl get svc msb-gateway -n msb-system
+# NAME          TYPE        CLUSTER-IP     PORT(S)    AGE
+# msb-gateway   ClusterIP   10.96.0.42     8080/TCP   1m
+```
+
+The Service is ClusterIP only, reachable in-cluster or via `kubectl port-forward`. External access (Ingress, TLS) is cluster-specific and not shipped.
+
+## Point the SDK at it
+
+Set `MSB_API_URL` to the Service and `MSB_API_KEY` to a Kubernetes ServiceAccount token. The token's namespace is the namespace whose sandboxes the SDK operates on:
+
+```bash
+export MSB_API_URL=http://msb-gateway.msb-system.svc:8080
+export MSB_API_KEY=$(kubectl create token my-sa -n my-namespace)
+```
+
+```python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create("agent-sandbox", image="python")
+output = await sb.exec("python", ["-c", "print(2 + 2)"])
+print(output.stdout_text)
+```
+
+Grant the ServiceAccount the sandbox verbs (the operator bundle ships aggregated `sandbox-operator`/`sandbox-viewer` ClusterRoles):
+
+```bash
+kubectl create rolebinding my-sa-sandbox \
+  --clusterrole=sandbox-operator \
+  --serviceaccount=my-namespace:my-sa \
+  -n my-namespace
+```
+
+<Note>
+`kubectl create token` mints a short-lived token (default one hour). Add `--duration` for longer, or mount a projected token in-cluster.
+</Note>
+
+From outside the cluster, forward the Service first:
+
+```bash
+kubectl port-forward -n msb-system svc/msb-gateway 8080:8080
+export MSB_API_URL=http://localhost:8080
+```
+
+See [Accessing sandboxes](/workloads/accessing-sandboxes) for driving sandboxes with the SDK, and [Logs and status](/workloads/logs-and-status#streaming-logs-to-an-sdk-client) for SDK log streaming.
+
+## Unsupported request fields
+
+The gateway maps the SDK's create request onto the `Sandbox` CRD. Some msb SDK
+fields have no equivalent yet; rather than silently ignore them, the gateway
+**rejects** the request with `400 invalid_request` if any are set:
+
+- `network.policy`, `network.secrets`, `network.maxConnections`, and
+  `network.enabled: false`
+- `mounts`, `patches`, `init`
+- `resources.diskSizeMib`
+
+`pullPolicy` is not rejected but has no effect: the per-node daemon pre-pulls
+images, so a sandbox always boots with `Never` regardless of what the SDK sets.

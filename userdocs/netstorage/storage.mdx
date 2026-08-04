@@ -1,0 +1,33 @@
+---
+title: Storage
+description: The ephemeral upper layer, and what is not yet supported
+icon: "hard-drive"
+---
+
+Each sandbox has a writable upper layer over its read-only image. Writes land there; the layer is discarded when the sandbox exits. Nothing written inside a sandbox survives its lifetime.
+
+Size the layer with `upper.size` (a Kubernetes quantity, default `4Gi`):
+
+```yaml
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: build
+spec:
+  image: python:3.12
+  cmd: ["python3", "build.py"]
+  upper:
+    size: 8Gi
+```
+
+<Warning>
+The upper layer is ephemeral. A restart (including a `RestartRequired` resize or `desiredState: Stopped` then `Running`) is a fresh boot on a clean layer; guest state is not preserved.
+</Warning>
+
+<Note>
+`upper.size` is immutable; set it at creation.
+</Note>
+
+## Persistent volumes
+
+Not supported yet. There is no way to attach a PersistentVolumeClaim or otherwise keep guest data across a sandbox's lifetime. For now, persist anything you need to keep outside the sandbox: write it to an external service over the network before the sandbox exits. See [Secrets and environment](/netstorage/secrets-and-env) and [Ports and Services](/netstorage/ports-and-services).

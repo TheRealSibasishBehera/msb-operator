@@ -1,0 +1,54 @@
+---
+title: Ports and Services
+description: Publish a guest port and reach it in the cluster
+icon: "network-wired"
+---
+
+Publish a port that a server inside the sandbox listens on, and reach it through the
+sandbox's Service.
+
+```yaml
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: web
+spec:
+  image: python:3.12
+  cpus: 1
+  memory: 512
+  cmd: ["python3", "-m", "http.server", "8000"]
+  network:
+    publishedPorts:
+      - guestPort: 8000
+```
+
+Each published port becomes a port on the sandbox's `ClusterIP` Service. Find the
+Service name in the status:
+
+```bash
+kubectl get sandbox web -o jsonpath='{.status.serviceName}'
+```
+
+Then reach the sandbox from anywhere in the cluster:
+
+```
+http://<serviceName>.<namespace>.svc:8000
+```
+
+## Port options
+
+```yaml
+publishedPorts:
+  - guestPort: 8000        # required: the port the server listens on in the guest
+    hostPort: 9090         # optional: the Service port (defaults to guestPort)
+    protocol: TCP          # optional: TCP or UDP (defaults to TCP)
+```
+
+<Note>
+  Ports `7000` and `8080` are reserved for the sandbox's bridge. A `hostPort`
+  that collides with either is rejected — the Sandbox goes `Failed` with a
+  `PortConflict` condition. Pick any other port.
+</Note>
+
+External access (a LoadBalancer or Ingress) is up to you. Put one in front of the
+Service.

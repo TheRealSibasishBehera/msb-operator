@@ -1,0 +1,96 @@
+---
+title: Logs and status
+description: Reading sandbox state and guest output
+icon: "file-lines"
+---
+
+`kubectl get sandbox` shows a sandbox's state as columns:
+
+```bash
+kubectl get sandbox
+```
+
+| Column | Source | Meaning |
+| --- | --- | --- |
+| `PHASE` | `.status.phase` | `Pending`, `Running`, `Stopped`, `Succeeded`, or `Failed`. |
+| `READY` | `Ready` condition | `True` once the guest is booted and reachable. |
+| `RESTARTS` | `.status.restartCount` | Recreations under `runPolicy: RerunOnFailure`. |
+| `AGE` | `.metadata.creationTimestamp` | Time since the sandbox was created. |
+
+`Stopped` means at rest via `spec.desiredState: Stopped` (restartable); `Succeeded`/`Failed` mean the guest exited on its own. See [Lifecycle](/workloads/lifecycle).
+
+`kubectl get sandbox -o wide` adds the per-sandbox diagnostic columns:
+
+```bash
+kubectl get sandbox -o wide
+```
+
+| Column | Source | Meaning |
+| --- | --- | --- |
+| `REASON` | `.status.terminationReason` | Why it ended, for example `Completed`, `IdleTimeout`, `OOMKilled`. |
+| `EXIT` | `.status.exitCode` | The guest command's exit code. |
+| `NODE` | `.status.nodeName` | The node the sandbox landed on. |
+
+## Conditions
+
+```bash
+kubectl get sandbox web -o jsonpath='{.status.conditions}' | jq
+```
+
+- **`Ready`**: `True` when the guest is booted and reachable, `False` otherwise (with a `reason`/`message` explaining why).
+- **`RestartRequired`**: `True` when a `spec.cpus`/`spec.memory` edit could not be applied to the running guest and needs a restart. See [Resources](/workloads/resources) and [Troubleshooting](/install/troubleshooting#restartrequired-condition).
+
+`kubectl describe sandbox web` prints the conditions and exposed ports in one view. The operator records Kubernetes Events for notable transitions (a stop, a failure, a port conflict); a healthy running sandbox may show none.
+
+## Guest console logs
+
+Guest stdout/stderr is not captured by default. Opt in with `spec.logging.guestConsole`:
+
+```yaml
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: web
+spec:
+  image: python:3.12
+  cmd: ["python3", "-m", "http.server", "8000"]
+  logging:
+    guestConsole: true
+```
+
+This adds an `msb-console-log` container to the pod that tails the guest console, so `kubectl logs` reads it:
+
+```bash
+kubectl logs sandbox-web -c msb-console-log
+kubectl logs sandbox-web -c msb-console-log -f    # follow
+```
+
+<Note>
+`logging.guestConsole` is immutable; set it at creation. Without it there is no console container and `kubectl logs -c msb-console-log` fails.
+</Note>
+
+## Streaming logs to an SDK client
+
+When the [gateway](/install/gateway) is enabled, the microsandbox SDK streams the
+same guest console, no `kubectl` needed:
+
+```python
+from microsandbox import Sandbox
+
+sb = await (await Sandbox.get("web")).connect()
+stream = await sb.log_stream(follow=True)
+async for entry in stream:
+    print(entry.source, entry.text())
+```
+
+The stream requires `spec.logging.guestConsole` on the sandbox, and is live-follow
+only:
+
+<Note>
+Only `follow=True` works through the gateway; it streams new lines as they arrive.
+`follow=False` (a bounded historical read) is not available; the gateway does not
+replay past logs.
+</Note>
+
+A sandbox created without `logging.guestConsole` returns an error telling you to
+enable it.

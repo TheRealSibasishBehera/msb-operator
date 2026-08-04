@@ -1,0 +1,67 @@
+---
+title: Install
+description: Install the operator with a single kubectl apply
+icon: "download"
+---
+
+<Warning>
+  Pre-release: the release assets referenced below are not published yet. Until
+  they are, install from a checkout of the repo with `kubectl apply -k deploy/`.
+  These docs describe the shipping form.
+</Warning>
+
+The operator ships as a single bundled manifest. Install it with one command:
+
+```bash
+kubectl apply -f https://github.com/TheRealSibasishBehera/msb-operator/releases/latest/download/msb-operator.yaml
+```
+
+This applies everything: the `msb-system` namespace, the `Sandbox` CRD, the
+controller, and the per-node daemon. To pin a version, replace `latest` with a
+release tag.
+
+There is no separate namespace step. The bundle carries the namespace with its
+`pod-security.kubernetes.io/enforce: privileged` label already set, which the
+daemon requires to mount `/dev/kvm` and the device-plugin socket as hostPaths.
+
+<Note>
+  Sandbox pods do **not** need privilege; they run `restricted` in whatever
+  tenant namespace you create them in. Only the operator's own namespace is
+  privileged. See [Namespaces and Pod Security](/install/namespaces-and-podsecurity).
+</Note>
+
+## Verify
+
+```bash
+kubectl -n msb-system rollout status deploy/msb-controller
+kubectl -n msb-system rollout status ds/msb-daemon
+kubectl get nodes -o jsonpath='{.items[*].status.allocatable.devices\.microsandbox\.dev/kvm}'
+```
+
+The last command should print a non-zero KVM count for your KVM-capable nodes. If
+it is empty or zero everywhere, see [Requirements](/install/requirements).
+
+## Configure
+
+The bundle applies working defaults. To change them, use it as a Kustomize base
+and layer an overlay:
+
+```yaml
+# kustomization.yaml
+resources:
+  - https://github.com/TheRealSibasishBehera/msb-operator/releases/latest/download/msb-operator.yaml
+images:
+  - name: ghcr.io/superradcompany/msb-controller
+    newTag: v0.2.0
+```
+
+```bash
+kubectl apply -k .
+```
+
+See [Configuration](/reference/configuration) for the knobs worth overriding.
+
+## The gateway
+
+The SDK-compatible gateway is a separate, opt-in bundle. See
+[Enable the gateway](/install/gateway).

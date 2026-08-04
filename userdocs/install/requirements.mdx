@@ -1,0 +1,41 @@
+---
+title: Requirements
+description: KVM nodes, namespace model, supported versions
+icon: "list-check"
+---
+
+To run the operator you need KVM-capable worker nodes, a privileged operator namespace, and a supported Kubernetes version.
+
+## KVM-capable nodes
+
+Sandboxes are microVMs and need hardware virtualization. Every node that runs sandboxes must expose `/dev/kvm`:
+
+```bash
+kubectl debug node/<node> -it --image=busybox -- ls -l /host/dev/kvm
+# crw-rw-rw- ... /host/dev/kvm      -> KVM present
+# ls: /host/dev/kvm: No such file  -> not KVM-capable
+```
+
+The operator daemon runs on these nodes, makes `/dev/kvm` accessible, and advertises a `devices.microsandbox.dev/kvm` resource. Each sandbox requests one, so it schedules onto a KVM-capable node or stays `Pending`.
+
+<Warning>
+Managed control planes (EKS, GKE, AKS) usually run on VM node types **without** nested virtualization, so `/dev/kvm` is absent and no sandbox will schedule. Use bare-metal nodes, or node types that expose nested virtualization (for example GCE `nested-virtualization` enabled instances, or a bare-metal node pool).
+</Warning>
+
+<Note>
+The daemon runs as a DaemonSet that tolerates all taints by default. Restrict it to specific nodes with a `nodeSelector` overlay; see [Configuration](/reference/configuration).
+</Note>
+
+## Privileged operator namespace
+
+The operator installs into its own namespace (`msb-system` by convention). That namespace must be labeled Pod Security **privileged**, because the operator uses host paths (the device-plugin socket and `/dev/kvm`) that `baseline`/`restricted` forbid:
+
+```yaml
+pod-security.kubernetes.io/enforce: privileged
+```
+
+Sandbox pods themselves run at `restricted` and can live in any ordinary tenant namespace and need no privilege. The install bundle carries this labeled namespace, so a single `kubectl apply` sets it up. See [Namespaces and Pod Security](/install/namespaces-and-podsecurity) and [Install](/install/install).
+
+## Kubernetes version
+
+The device-plugin API used to advertise KVM is `v1beta1`, and the CRD uses CEL validation for per-field immutability. Kubernetes **1.25+** is required; **1.28 or newer** is recommended.

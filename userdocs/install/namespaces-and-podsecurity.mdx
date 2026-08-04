@@ -1,0 +1,50 @@
+---
+title: Namespaces and Pod Security
+description: The privileged operator namespace vs restricted tenant namespaces
+icon: "layer-group"
+---
+
+The operator and the sandboxes it runs sit at two different Pod Security levels,
+in different namespaces.
+
+## The operator namespace is privileged
+
+The operator installs into `msb-system`, which must carry:
+
+```yaml
+pod-security.kubernetes.io/enforce: privileged
+```
+
+The per-node daemon mounts `/dev/kvm` and the kubelet device-plugin socket as
+hostPaths, which the `baseline` and `restricted` levels forbid. The install
+bundle ships this namespace already labeled, so a single `kubectl apply` sets it
+up and you never create it yourself.
+
+Only the operator's own namespace is privileged. Nothing a tenant does runs here.
+
+## Sandbox pods are restricted
+
+A `Sandbox` you create in your own namespace produces a pod that runs at
+`restricted` — no privilege, no host mounts. The isolation comes from the microVM
+boundary, not from pod privileges, so sandbox pods need none. You can create
+sandboxes in any ordinary namespace.
+
+## Granting tenants access
+
+The bundle ships two cluster-scoped roles. Bind them per-namespace with a
+`RoleBinding` to control who can manage sandboxes where:
+
+| Role | Grants |
+| --- | --- |
+| `sandbox-operator` | full CRUD on `sandboxes` in the bound namespace |
+| `sandbox-viewer` | read-only on `sandboxes` in the bound namespace |
+
+```bash
+kubectl create rolebinding team-a-sandboxes \
+  --clusterrole=sandbox-operator \
+  --serviceaccount=team-a:default \
+  -n team-a
+```
+
+Neither role grants access to the operator's own pods, services, or to Secrets —
+a tenant can manage sandboxes and nothing else.

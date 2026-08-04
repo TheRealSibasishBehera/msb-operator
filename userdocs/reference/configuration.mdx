@@ -1,0 +1,97 @@
+---
+title: Configuration
+description: Overriding the bundle defaults with a Kustomize overlay
+icon: "sliders"
+---
+
+The install bundle applies working defaults. Change them by using it as a
+Kustomize base and layering an overlay, then `kubectl apply -k .`.
+
+```yaml
+# kustomization.yaml
+resources:
+  - https://github.com/TheRealSibasishBehera/msb-operator/releases/latest/download/msb-operator.yaml
+```
+
+## Images
+
+Retag or repoint every operator image at once:
+
+```yaml
+images:
+  - name: ghcr.io/superradcompany/msb-controller
+    newTag: v0.2.0
+  - name: ghcr.io/superradcompany/msb-daemon
+    newTag: v0.2.0
+```
+
+The controller stamps two more images onto the sandbox pods it creates, passed as
+environment variables (`MSB_RUNTIME_IMAGE`, `MSB_BRIDGE_IMAGE`) rather than
+container images, so the `images` transformer does not reach them. Override them
+with a strategic-merge patch:
+
+```yaml
+patches:
+  - target: { kind: Deployment, name: msb-controller }
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: msb-controller
+      spec:
+        template:
+          spec:
+            containers:
+              - name: msb-controller
+                env:
+                  - name: MSB_RUNTIME_IMAGE
+                    value: ghcr.io/superradcompany/msb-runtime:v0.2.0
+                  - name: MSB_BRIDGE_IMAGE
+                    value: ghcr.io/superradcompany/msb-bridge:v0.2.0
+```
+
+## Controller
+
+| Setting | Default | Where |
+|---|---|---|
+| Replicas | `2` (leader-elected) | `spec.replicas` on the `msb-controller` Deployment |
+| Log level | `info` | `RUST_LOG` env |
+| Lease TTL | `15s` | `MSB_LEASE_TTL_SECS` env |
+
+```yaml
+patches:
+  - target: { kind: Deployment, name: msb-controller }
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+```
+
+## Daemon
+
+| Setting | Default | Where |
+|---|---|---|
+| KVM device path | `/dev/kvm` | `--kvm-path` arg |
+| Cache host path | `/var/lib/msb/cache` | `MSB_CACHE_HOST_PATH` env + the `cache` hostPath volume |
+| Node selector | none (all nodes) | `spec.template.spec.nodeSelector` |
+
+To restrict the daemon to labelled nodes:
+
+```yaml
+patches:
+  - target: { kind: DaemonSet, name: msb-daemon }
+    patch: |
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { microsandbox.dev/kvm: "true" }
+```
+
+## Tenant roles
+
+The bundle ships two cluster-scoped roles for granting Sandbox access, bound
+per-namespace with a `RoleBinding`:
+
+| Role | Grants |
+|---|---|
+| `sandbox-operator` | full CRUD on `sandboxes` |
+| `sandbox-viewer` | read-only on `sandboxes` |

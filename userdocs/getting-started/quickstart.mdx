@@ -1,0 +1,114 @@
+---
+title: Quickstart
+description: Empty cluster to a running sandbox
+icon: "bolt"
+---
+
+<Note>
+  You need a cluster with **KVM-capable nodes** (`/dev/kvm` present) and permission
+  to create a privileged namespace for the operator. See
+  [Requirements](/install/requirements).
+</Note>
+
+<Warning>
+  Pre-release: the release download below is not published yet. Until it is, install
+  from a repo checkout with `kubectl apply -k deploy/`; see the [Install page](/install/install).
+</Warning>
+
+<Steps>
+  <Step title="Install the operator">
+    One command installs everything: the namespace, the CRD, the controller, and
+    the per-node daemon:
+
+    ```bash
+    kubectl apply -f https://github.com/TheRealSibasishBehera/msb-operator/releases/latest/download/msb-operator.yaml
+    ```
+
+    Wait for it to come up:
+
+    ```bash
+    kubectl -n msb-system rollout status deploy/msb-controller
+    kubectl -n msb-system rollout status ds/msb-daemon
+    ```
+
+    <Note>
+      To change the image registry, replica counts, or other defaults, layer a
+      Kustomize overlay on the bundle; see [Configuration](/reference/configuration).
+    </Note>
+  </Step>
+
+  <Step title="Create a Sandbox">
+    A `Sandbox` is one pod running one microVM. This is the smallest useful one:
+
+    ```bash
+    cat <<'EOF' | kubectl apply -f -
+    apiVersion: sandbox.microsandbox.dev/v1alpha1
+    kind: Sandbox
+    metadata:
+      name: agent-sandbox
+    spec:
+      image: alpine:3.20
+      cpus: 1
+      memory: 512
+      cmd: ["sleep", "600"]
+    EOF
+    ```
+  </Step>
+
+  <Step title="Watch it come up">
+    Watch the phase go from `Pending` to `Running`:
+
+    ```bash
+    kubectl get sandbox agent-sandbox -w -o custom-columns=NAME:.metadata.name,PHASE:.status.phase
+    ```
+
+    ```
+    NAME    PHASE
+    agent-sandbox   Pending
+    agent-sandbox   Running
+    ```
+
+    The first boot on a node takes a little longer while the image is prepared;
+    later sandboxes using the same image start fast.
+  </Step>
+
+  <Step title="Run code in the sandbox">
+    With the [gateway](/install/gateway) enabled, drive the sandbox with the
+    microsandbox SDK:
+
+    ```python
+    from microsandbox import Sandbox
+
+    sb = await (await Sandbox.get("agent-sandbox")).connect()
+    output = await sb.exec("uname", ["-a"])   # runs inside the guest kernel
+    print(output.stdout_text)
+    ```
+  </Step>
+
+  <Step title="Stop and start it">
+    `spec.desiredState` is the power switch. Stopping removes the Pod but keeps the
+    Sandbox object:
+
+    ```bash
+    kubectl patch sandbox agent-sandbox --type merge -p '{"spec":{"desiredState":"Stopped"}}'
+    kubectl patch sandbox agent-sandbox --type merge -p '{"spec":{"desiredState":"Running"}}'
+    ```
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Sandbox and Kubernetes" icon="diagram-project" href="/getting-started/sandbox-and-kubernetes">
+    How your msb mental model maps onto the CRD.
+  </Card>
+  <Card title="Lifecycle" icon="arrows-rotate" href="/workloads/lifecycle">
+    Phases, start/stop, and run-to-completion.
+  </Card>
+  <Card title="Drive it with the SDK" icon="plug" href="/workloads/accessing-sandboxes">
+    Point the unmodified msb SDK at the cluster.
+  </Card>
+  <Card title="Sandbox spec reference" icon="table" href="/reference/sandbox-spec">
+    Every field on the Sandbox resource.
+  </Card>
+</CardGroup>

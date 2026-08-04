@@ -1,0 +1,64 @@
+---
+title: Sandbox and Kubernetes
+description: How a Sandbox maps to Kubernetes objects
+icon: "diagram-project"
+---
+
+A `Sandbox` is one microVM, backed by one Pod and one Service.
+
+```yaml
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: agent-sandbox
+  namespace: default
+spec:
+  image: alpine:3.20
+  cpus: 1
+  memory: 512
+  cmd: ["python3", "-m", "http.server", "8000"]
+```
+
+Applying this creates:
+
+- a **Pod** named `sandbox-agent-sandbox` that runs the microVM,
+- a **Service** that fronts it, so other workloads can reach the sandbox by a
+  stable name.
+
+You manage the `Sandbox`, not the Pod or Service; they are created and deleted for
+you, and editing them directly has no effect.
+
+## Field mapping
+
+| On the Sandbox | Becomes |
+|---|---|
+| `spec.image` | the guest's root image |
+| `spec.cpus` / `spec.memory` | the Pod's CPU and memory requests |
+| `spec.maxCpus` / `spec.maxMemory` | the Pod's CPU and memory limits (the resize ceiling) |
+| `spec.secrets` | Kubernetes `Secret` values, mounted and resolved into the guest |
+| `spec.network.publishedPorts` | ports on the per-sandbox Service |
+| `metadata.labels` | labels on the Pod and Service |
+| `spec.desiredState` | whether the Pod exists (`Running`) or not (`Stopped`) |
+
+## Status
+
+`kubectl get sandbox` shows the state directly:
+
+```bash
+kubectl get sandbox agent-sandbox
+```
+
+The key columns are `PHASE` (`Pending`, `Running`, `Stopped`, `Succeeded`, or
+`Failed`) and `READY` (whether the sandbox is reachable). See
+[Logs and status](/workloads/logs-and-status) for the full set.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Lifecycle" icon="arrows-rotate" href="/workloads/lifecycle">
+    Start, stop, and control what happens on exit.
+  </Card>
+  <Card title="Sandbox spec reference" icon="table" href="/reference/sandbox-spec">
+    Every field on the Sandbox resource.
+  </Card>
+</CardGroup>

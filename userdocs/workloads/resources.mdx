@@ -1,0 +1,70 @@
+---
+title: Resources and resize
+description: vCPUs, memory, and live resize
+icon: "microchip"
+---
+
+Set `cpus` and `memory` on a sandbox, and reserve a `maxCpus`/`maxMemory` envelope
+to resize it later without a restart.
+
+```yaml
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: worker
+spec:
+  image: alpine:3.20
+  cpus: 1
+  memory: 512      # MiB
+  maxCpus: 4
+  maxMemory: 2048
+```
+
+`cpus` and `memory` are what the sandbox boots with. `maxCpus` and `maxMemory` are
+the ceiling it can grow to while running. They are reserved at boot, so set them
+when you create the sandbox.
+
+## Resize a running sandbox
+
+Edit `cpus` or `memory` up to the reserved ceiling, and the change applies live:
+
+```bash
+kubectl patch sandbox worker --type merge -p '{"spec":{"cpus":4,"memory":2048}}'
+```
+
+The guest gains the CPU and memory in place, with no restart and no new Pod. Watch
+it converge:
+
+```bash
+kubectl get sandbox worker -o jsonpath='{.status.appliedCpus} {.status.appliedMemory}{"\n"}'
+```
+
+`appliedCpus` and `appliedMemory` report what the guest is actually running with;
+they catch up to `spec` once the resize lands.
+
+<Note>
+Resize is a Kubernetes-side operation: edit the `Sandbox` with `kubectl` or your
+manifests. The SDK has no resize call.
+</Note>
+
+## Growing beyond the ceiling
+
+You can only resize up to `maxCpus`/`maxMemory`. Editing `cpus`/`memory` above the
+ceiling is rejected. The ceiling itself is fixed at boot and immutable, so raising
+it means deleting the sandbox and creating a new one with a larger envelope.
+
+<Warning>
+  A sandbox created without a `maxCpus`/`maxMemory` above its `cpus`/`memory` has no
+  headroom to resize into. Editing `cpus`/`memory` then sets a `RestartRequired`
+  condition instead of resizing. Stop and start the sandbox to apply the new size.
+</Warning>
+
+## Requests and limits
+
+The boot size (`cpus`/`memory`) drives the Pod's resource **requests** and the
+ceiling (`maxCpus`/`maxMemory`) its **limits**, so the scheduler reserves the boot
+size and the sandbox can burst up to the ceiling. The mapping is not one-to-one:
+the CPU request is scaled down by an overcommit ratio (a 1-vCPU sandbox requests
+well under a full core), and the memory request/limit add a fixed VMM overhead on
+top of `memory`/`maxMemory`. The runtime container also requests one
+`devices.microsandbox.dev/kvm`, which pins the sandbox to a KVM-capable node.

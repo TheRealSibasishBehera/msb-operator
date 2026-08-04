@@ -1,0 +1,74 @@
+---
+title: kubectl recipes
+description: Common one-liners
+icon: "terminal"
+---
+
+Common `kubectl` commands for sandboxes. The short name is `sb`.
+
+## Create
+
+```bash
+kubectl apply -f sandbox.yaml
+```
+
+```yaml
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: web
+spec:
+  image: python:3.12
+  cpus: 1
+  memory: 512
+  cmd: ["python3", "-m", "http.server", "8000"]
+```
+
+## Get and watch
+
+```bash
+kubectl get sandbox                 # or: kubectl get sb
+kubectl get sandbox web -o yaml
+kubectl get sandbox -w              # watch phase changes
+```
+
+## Describe
+
+```bash
+kubectl describe sandbox web        # conditions, exposed ports, transition events
+```
+
+## Stop and start
+
+`spec.desiredState` is the one mutable lifecycle field:
+
+```bash
+kubectl patch sandbox web --type=merge -p '{"spec":{"desiredState":"Stopped"}}'
+kubectl patch sandbox web --type=merge -p '{"spec":{"desiredState":"Running"}}'
+```
+
+## Resize CPU and memory
+
+Mutable up to `maxCpus`/`maxMemory`; within the boot envelope this resizes live, otherwise it sets [`RestartRequired`](/install/troubleshooting#restartrequired-condition):
+
+```bash
+kubectl patch sandbox web --type=merge -p '{"spec":{"cpus":2,"memory":1024}}'
+```
+
+## Logs
+
+Requires `spec.logging.guestConsole: true` on the sandbox:
+
+```bash
+kubectl logs sandbox-web -c msb-console-log
+kubectl logs sandbox-web -c msb-console-log -f
+```
+
+## Delete
+
+```bash
+kubectl delete sandbox web
+kubectl delete sandbox --all -n <namespace>
+```
+
+See [Lifecycle](/workloads/lifecycle), [Resources](/workloads/resources), and [Accessing sandboxes](/workloads/accessing-sandboxes) for the full behavior behind these commands.

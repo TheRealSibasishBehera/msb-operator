@@ -1,0 +1,30 @@
+---
+title: Uninstall
+description: Remove the operator
+icon: "trash"
+---
+
+Delete the bundle the same way you applied it. If you installed the gateway,
+remove it first:
+
+```bash
+kubectl delete -f https://github.com/TheRealSibasishBehera/msb-operator/releases/latest/download/msb-operator-gateway.yaml
+kubectl delete -f https://github.com/TheRealSibasishBehera/msb-operator/releases/latest/download/msb-operator.yaml
+```
+
+Deleting the bundle removes the namespace, controller, daemon, and RBAC.
+
+## Sandboxes and the CRD
+
+The bundle includes the `Sandbox` CRD, so `kubectl delete -f` above removes it,
+and with it **every** `Sandbox` in every namespace. To take the operator down
+while keeping sandboxes, delete only the workloads and leave the CRD:
+
+```bash
+kubectl -n msb-system delete deploy/msb-controller ds/msb-daemon
+```
+
+<Warning>
+Deleting the CRD deletes every Sandbox cluster-wide. The full-bundle delete above
+does this. Detach the CRD first if you want the sandboxes to survive.
+</Warning>

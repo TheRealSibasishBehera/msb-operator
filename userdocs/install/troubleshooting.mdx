@@ -1,0 +1,73 @@
+---
+title: Troubleshooting
+description: The failure modes you actually hit
+icon: "wrench"
+---
+
+Each failure below is symptom, cause, then fix.
+
+## Sandbox stuck Pending
+
+**Symptom.** `kubectl get sandbox` shows `PHASE: Pending` and it never advances.
+
+```bash
+kubectl describe pod sandbox-<name>
+```
+
+**Cause.** Either no node advertises `devices.microsandbox.dev/kvm` (events show `Insufficient devices.microsandbox.dev/kvm`), or the pod is scheduled and still pulling the image.
+
+**Fix.** Confirm a node offers KVM:
+
+```bash
+kubectl get nodes -o custom-columns=\
+NODE:.metadata.name,KVM:.status.allocatable.devices\.microsandbox\.dev/kvm
+```
+
+If every node shows `<none>`, the node is not KVM-capable or the daemon is not running there; see [Requirements](/install/requirements). If a node offers KVM and the pod is scheduled, wait for the pull to finish, or diagnose it below.
+
+## ImagePull / cache issues
+
+**Symptom.** The pod is `ImagePullBackOff` or `ErrImagePull`, or events mention a cache miss.
+
+**Cause.** The image is not yet available on the node: a first-time pull, an unreachable registry, or a private registry with no pull secret.
+
+**Fix.** Watch the pull complete on first use. For a private registry, add `imagePullSecrets` to the operator ServiceAccounts with an overlay; see [Configuration](/reference/configuration). For persistent pull failures, verify the image reference and that the node can reach the registry:
+
+```bash
+kubectl get events --field-selector involvedObject.name=sandbox-<name>
+```
+
+## Missing Secret (fail-closed)
+
+**Symptom.** The sandbox never reaches `Running`; pod events show `FailedMount` referencing a Secret name.
+
+**Cause.** A `spec.secrets` entry references a Secret (or key) that does not exist. The kubelet cannot mount it, so the pod never starts. This is deliberate: a sandbox that needs a secret does **not** boot without it.
+
+**Fix.** Create the referenced Secret in the sandbox's namespace, or correct the `secretKeyRef`:
+
+```bash
+kubectl create secret generic my-secret \
+  --from-literal=token=... -n <namespace>
+```
+
+See [Secrets and environment](/netstorage/secrets-and-env).
+
+## RestartRequired condition
+
+**Symptom.** After patching `spec.cpus` or `spec.memory`, the value doesn't take effect and the sandbox has a `RestartRequired` condition with `status: True`.
+
+```bash
+kubectl get sandbox <name> \
+  -o jsonpath='{.status.conditions[?(@.type=="RestartRequired")]}' | jq
+```
+
+**Cause.** A live resize only works within the boot-time envelope reserved by `maxCpus`/`maxMemory`. A sandbox booted without headroom (no `maxCpus`/`maxMemory`, or an edit beyond them) cannot hotplug. The operator never auto-restarts, because a restart on the current storage model loses guest state.
+
+**Fix.** Restart the sandbox to apply the new size, accepting the fresh boot:
+
+```bash
+kubectl patch sandbox <name> --type=merge -p '{"spec":{"desiredState":"Stopped"}}'
+kubectl patch sandbox <name> --type=merge -p '{"spec":{"desiredState":"Running"}}'
+```
+
+To resize live in future, boot with headroom by setting `maxCpus`/`maxMemory` above the starting `cpus`/`memory`. See [Resources](/workloads/resources).

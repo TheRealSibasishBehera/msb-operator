@@ -1,0 +1,108 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "msb-operator",
+  "colors": {
+    "primary": "#BF84FE",
+    "light": "#BF84FE",
+    "dark": "#BF84FE"
+  },
+  "description": "Run microsandbox microVMs as a Kubernetes Sandbox resource",
+  "appearance": {
+    "default": "system"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/TheRealSibasishBehera/msb-operator"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "icon": "rocket",
+            "pages": [
+              "getting-started/introduction",
+              "getting-started/quickstart",
+              "getting-started/sandbox-and-kubernetes"
+            ]
+          },
+          {
+            "group": "Workloads",
+            "icon": "box",
+            "pages": [
+              "workloads/lifecycle",
+              "workloads/resources",
+              "workloads/accessing-sandboxes",
+              "workloads/security",
+              "workloads/logs-and-status"
+            ]
+          },
+          {
+            "group": "Networking and storage",
+            "icon": "network-wired",
+            "pages": [
+              "netstorage/ports-and-services",
+              "netstorage/secrets-and-env",
+              "netstorage/network",
+              "netstorage/storage"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Sandbox CRD",
+            "icon": "table",
+            "pages": [
+              "reference/sandbox-spec",
+              "reference/sandbox-status"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Install & operate",
+        "groups": [
+          {
+            "group": "Install & operate",
+            "icon": "download",
+            "pages": [
+              "install/requirements",
+              "install/install",
+              "install/namespaces-and-podsecurity",
+              "install/gateway",
+              "reference/configuration",
+              "install/troubleshooting",
+              "install/uninstall",
+              "reference/kubectl-recipes"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Changelog",
+        "groups": [
+          {
+            "group": "Changelog",
+            "icon": "clock-rotate-left",
+            "pages": [
+              "changelog/overview"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/TheRealSibasishBehera/msb-operator"
+    }
+  }
+}
