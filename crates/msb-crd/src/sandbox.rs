@@ -72,7 +72,8 @@ pub struct SandboxSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
 
-    /// Working directory for guest commands. This field is immutable.
+    /// Working directory for guest commands. Must already exist in the image, or
+    /// the sandbox fails to boot. This field is immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
 

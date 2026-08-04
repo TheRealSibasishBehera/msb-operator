@@ -391,7 +391,9 @@ spec:
                 nullable: true
                 type: string
               workdir:
-                description: Working directory for guest commands. This field is immutable.
+                description: |-
+                  Working directory for guest commands. Must already exist in the image, or
+                  the sandbox fails to boot. This field is immutable.
                 nullable: true
                 type: string
             required:
