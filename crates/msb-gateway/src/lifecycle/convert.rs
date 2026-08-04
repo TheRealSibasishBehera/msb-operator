@@ -7,7 +7,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use kube::api::ObjectMeta;
 use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudRlimit, CloudRlimitResource,
-    CloudRootfsSource, CloudSandboxStatus, SecurityProfile as WireSecurityProfile,
+    CloudRootfsSource, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, EnvVar,
+    SecurityProfile as WireSecurityProfile,
 };
 use msb_crd::sandbox::{Rlimit, RlimitResource, SecurityProfile};
 use msb_crd::{Sandbox, SandboxPhase, SandboxSpec, SandboxStatus};
@@ -85,12 +86,49 @@ pub struct SpecMapping {
     pub annotations: BTreeMap<String, String>,
 }
 
+/// Reject a request that sets a field the gateway does not implement, rather than
+/// silently dropping it. `pull_policy` is intentionally not rejected: the runtime
+/// always boots `Never` (the daemon pre-pulls), so the client's value is moot.
+fn reject_unsupported(spec: &microsandbox_types::CloudSandboxSpec) -> Result<(), GatewayError> {
+    let unsupported = |what: &str| {
+        Err(GatewayError::InvalidRequest(format!(
+            "{what} is not supported via the gateway"
+        )))
+    };
+    if !spec.network.enabled {
+        return unsupported("network.enabled=false");
+    }
+    if spec.network.policy.is_some() {
+        return unsupported("network.policy");
+    }
+    if spec.network.secrets.is_some() {
+        return unsupported("network.secrets");
+    }
+    if spec.network.max_connections.is_some() {
+        return unsupported("network.maxConnections");
+    }
+    if !spec.mounts.is_empty() {
+        return unsupported("mounts");
+    }
+    if !spec.patches.is_empty() {
+        return unsupported("patches");
+    }
+    if spec.init.is_some() {
+        return unsupported("init");
+    }
+    if spec.resources.disk_size_mib.is_some() {
+        return unsupported("resources.diskSizeMib");
+    }
+    Ok(())
+}
+
 /// Cloud create request -> CRD spec, k8s labels, and annotations for fields with no
 /// spec home. Labels that are valid k8s labels become selectable `metadata.labels`;
 /// the rest (msb labels are free-form) are preserved as `cloud-label.*` annotations.
 pub fn request_to_spec(req: &CloudCreateSandboxRequest) -> Result<SpecMapping, GatewayError> {
     let spec = &req.spec;
     validate_name(&spec.name)?;
+    reject_unsupported(spec)?;
 
     // Our CRD image is a plain OCI reference; the host-path variants have no
     // representation in our model (and would be a host-access escape).
@@ -270,6 +308,7 @@ pub fn sandbox_to_cloud(sb: &Sandbox, _namespace: &str) -> CloudCreateSandboxRes
     let started_at = time_to_chrono(status.started_at.as_ref());
     let stopped_at = time_to_chrono(status.terminated_at.as_ref());
     let last_error = last_error(&status);
+    let spec = spec_projection(&sb.spec, &name);
 
     CloudCreateSandboxResponse {
         id: name.clone(), // we collapse id == name; a closed loop we own both ends of
@@ -278,9 +317,7 @@ pub fn sandbox_to_cloud(sb: &Sandbox, _namespace: &str) -> CloudCreateSandboxRes
         name,
         status: wire_status,
         status_reason: None,
-        // The server-owned resolved-spec projection; the SDK never reconstructs
-        // the request from it, so we omit it.
-        spec: None,
+        spec,
         // We never delete a sandbox on completion (msb's `ephemeral` semantic).
         ephemeral: false,
         created_at: meta_created_at(meta),
@@ -288,6 +325,30 @@ pub fn sandbox_to_cloud(sb: &Sandbox, _namespace: &str) -> CloudCreateSandboxRes
         stopped_at,
         last_failure_message: last_error,
     }
+}
+
+/// A best-effort resolved-spec projection. The SDK defaults an exec session's
+/// cwd, user, and environment from it; without it, exec starts at `/` with no env.
+fn spec_projection(spec: &SandboxSpec, name: &str) -> Option<serde_json::Value> {
+    let projected = CloudSandboxSpec {
+        name: name.to_string(),
+        runtime: CloudSandboxRuntimeOptions {
+            workdir: spec.workdir.clone(),
+            shell: spec.shell.clone(),
+            user: spec.user.clone(),
+            ..Default::default()
+        },
+        env: spec
+            .env
+            .iter()
+            .map(|e| EnvVar {
+                key: e.name.clone(),
+                value: e.value.clone(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    serde_json::to_value(projected).ok()
 }
 
 fn last_error(status: &SandboxStatus) -> Option<String> {
@@ -365,6 +426,23 @@ mod tests {
         assert!(validate_name("-lead").is_err());
         assert!(validate_name("trail-").is_err());
         assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn unsupported_request_fields_are_rejected_not_dropped() {
+        let rejected = |mutate: fn(&mut CloudSandboxSpec)| {
+            let mut r = req();
+            mutate(&mut r.spec);
+            matches!(
+                request_to_spec(&r),
+                Err(GatewayError::InvalidRequest(_))
+            )
+        };
+        assert!(rejected(|s| s.network.enabled = false));
+        assert!(rejected(|s| s.network.max_connections = Some(10)));
+        assert!(rejected(|s| s.resources.disk_size_mib = Some(2048)));
+        // The unmodified request maps cleanly.
+        assert!(request_to_spec(&req()).is_ok());
     }
 
     #[test]
@@ -524,7 +602,7 @@ mod tests {
         assert_eq!(cloud.id, "raw-sb");
         assert_eq!(cloud.name, "raw-sb");
         assert_eq!(cloud.slug, "raw-sb");
-        assert!(cloud.spec.is_none()); // server-owned projection, we omit it
+        assert!(cloud.spec.is_some());
         assert!(!cloud.ephemeral);
         assert!(matches!(cloud.status, CloudSandboxStatus::Created)); // no phase, not started
     }
@@ -554,6 +632,9 @@ mod tests {
         assert_eq!(cloud.id, "my-sb");
         // We never report delete-on-completion, even when the request asked for it.
         assert!(!cloud.ephemeral);
-        assert!(cloud.spec.is_none());
+        let projected: CloudSandboxSpec =
+            serde_json::from_value(cloud.spec.expect("projection present")).unwrap();
+        assert_eq!(projected.runtime.workdir.as_deref(), Some("/app"));
+        assert_eq!(projected.env, vec![EnvVar { key: "K".into(), value: "V".into() }]);
     }
 }
