@@ -36,6 +36,26 @@ image-%: ## Build one image: docker/<name>/Dockerfile -> $(IMAGE_REGISTRY)/<name
 cluster-load-%: image-% ## Build + load one image into the cluster
 	$(CLUSTER_LOAD) $(IMAGE_REGISTRY)/$*:$(VERSION)
 
+# --- KVM dev cluster (needs a host with /dev/kvm) ------------------------------
+
+DEV_CLUSTER = CLUSTER_NAME=$(CLUSTER_NAME) VERSION=$(VERSION) IMAGE_REGISTRY=$(IMAGE_REGISTRY) hack/dev-cluster.sh
+
+.PHONY: kind-create
+kind-create: ## Create the kind cluster with /dev/kvm mounted (no-op if it exists)
+	$(DEV_CLUSTER) create
+
+.PHONY: setup
+setup: kind-create ## Create the cluster and build+load the operator images (no deploy)
+	$(DEV_CLUSTER) build-load
+
+.PHONY: run
+run: setup ## Full dev environment: cluster + build/load + deploy the operator
+	$(DEV_CLUSTER) apply
+
+.PHONY: undeploy
+undeploy: ## Delete the kind cluster
+	$(DEV_CLUSTER) delete
+
 # --- test ----------------------------------------------------------------------
 
 .PHONY: test
