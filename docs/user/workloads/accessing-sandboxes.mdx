@@ -14,15 +14,24 @@ Run commands in a sandbox with the microsandbox SDK through the gateway.
 </Note>
 
 The gateway speaks msb's cloud API, so your existing SDK code drives the cluster
-with no changes. Point it at the gateway and give it a Kubernetes token:
+with no changes. Point it at the gateway with a Kubernetes token; in-cluster use
+the Service DNS name, or from your machine forward it (see
+[Enable the gateway](/install/gateway) for both endpoints):
 
 ```bash
-export MSB_API_URL=http://msb-gateway.msb-system.svc:8080
+kubectl port-forward -n msb-system svc/msb-gateway 8080:8080
+export MSB_API_URL=http://localhost:8080
 export MSB_API_KEY=$(kubectl create token my-sa -n my-namespace)
 ```
 
+The default SDK backend runs sandboxes locally, so select the cloud backend
+explicitly:
+
 ```python
-from microsandbox import Sandbox
+import os
+from microsandbox import Sandbox, set_default_backend
+
+set_default_backend("cloud", url=os.environ["MSB_API_URL"], api_key=os.environ["MSB_API_KEY"])
 
 sb = await Sandbox.create("agent-run-42", image="python")
 output = await sb.exec("python", ["-c", "print(2 + 2)"])

@@ -18,26 +18,32 @@ kubectl get svc msb-gateway -n msb-system
 # msb-gateway   ClusterIP   10.96.0.42     8080/TCP   1m
 ```
 
-The Service is ClusterIP only, reachable in-cluster or via `kubectl port-forward`. External access (Ingress, TLS) is cluster-specific and not shipped.
+The Service is ClusterIP only. Its in-cluster DNS name resolves from Pods in the cluster; from your own machine you reach it through `kubectl port-forward` (external Ingress and TLS are cluster-specific and not shipped).
 
-## Point the SDK at it
+## Choose an endpoint
 
-Set `MSB_API_URL` to the Service and `MSB_API_KEY` to a Kubernetes ServiceAccount token. The token's namespace is the namespace whose sandboxes the SDK operates on:
+**In the cluster:** a workload running as a Pod uses the Service DNS name:
 
 ```bash
 export MSB_API_URL=http://msb-gateway.msb-system.svc:8080
+```
+
+**Local development:** the `.svc` name does not resolve from your machine, so forward the Service and point at `localhost`:
+
+```bash
+kubectl port-forward -n msb-system svc/msb-gateway 8080:8080
+export MSB_API_URL=http://localhost:8080
+```
+
+## Authenticate
+
+`MSB_API_KEY` is a Kubernetes ServiceAccount token. The gateway derives your namespace from it, so your sandboxes are created in the token's namespace under its RBAC:
+
+```bash
 export MSB_API_KEY=$(kubectl create token my-sa -n my-namespace)
 ```
 
-```python
-from microsandbox import Sandbox
-
-sb = await Sandbox.create("agent-sandbox", image="python")
-output = await sb.exec("python", ["-c", "print(2 + 2)"])
-print(output.stdout_text)
-```
-
-Grant the ServiceAccount the sandbox verbs (the operator bundle ships aggregated `sandbox-operator`/`sandbox-viewer` ClusterRoles):
+Grant that ServiceAccount the sandbox verbs (the operator bundle ships aggregated `sandbox-operator`/`sandbox-viewer` ClusterRoles):
 
 ```bash
 kubectl create rolebinding my-sa-sandbox \
@@ -50,11 +56,19 @@ kubectl create rolebinding my-sa-sandbox \
 `kubectl create token` mints a short-lived token (default one hour). Add `--duration` for longer, or mount a projected token in-cluster.
 </Note>
 
-From outside the cluster, forward the Service first:
+## Point the SDK at it
 
-```bash
-kubectl port-forward -n msb-system svc/msb-gateway 8080:8080
-export MSB_API_URL=http://localhost:8080
+The default SDK backend runs sandboxes locally, so select the cloud backend explicitly with the `MSB_API_URL` and `MSB_API_KEY` set above:
+
+```python
+import os
+from microsandbox import Sandbox, set_default_backend
+
+set_default_backend("cloud", url=os.environ["MSB_API_URL"], api_key=os.environ["MSB_API_KEY"])
+
+sb = await Sandbox.create("agent-sandbox", image="python")
+output = await sb.exec("python", ["-c", "print(2 + 2)"])
+print(output.stdout_text)
 ```
 
 See [Accessing sandboxes](/workloads/accessing-sandboxes) for driving sandboxes with the SDK, and [Logs and status](/workloads/logs-and-status#streaming-logs-to-an-sdk-client) for SDK log streaming.
