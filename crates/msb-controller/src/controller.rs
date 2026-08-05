@@ -333,9 +333,7 @@ async fn mark_running(
             now.clone(),
         ),
     );
-    let service_name = sandbox
-        .namespace()
-        .map(|ns| service::service_name(&ns, name));
+    let service_name = Some(service::service_name(name));
     let exposed_ports = sandbox
         .spec
         .network

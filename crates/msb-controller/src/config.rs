@@ -10,6 +10,7 @@ pub const MSB_HOME_MAX_BYTES: usize = 59;
 
 pub const KVM_RESOURCE: &str = "devices.microsandbox.dev/kvm";
 pub const SANDBOX_LABEL: &str = "microsandbox.dev/sandbox";
+pub const SANDBOX_NAME_LABEL: &str = "microsandbox.dev/sandbox-name";
 pub const FIELD_MANAGER: &str = "msb-controller";
 
 // Runtime-container resource sizing. On top of the guest RAM the pod carries the

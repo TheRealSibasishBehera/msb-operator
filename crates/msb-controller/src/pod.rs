@@ -13,7 +13,7 @@ use msb_crd::{Sandbox, SandboxSpec};
 
 use crate::config::{
     CPU_ALLOCATION_RATIO, ControllerConfig, EPHEMERAL_STORAGE_MIB, KVM_RESOURCE, SANDBOX_LABEL,
-    memory_overhead_mib,
+    SANDBOX_NAME_LABEL, memory_overhead_mib,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -122,7 +122,7 @@ pub fn build(sandbox: &Sandbox, cfg: &ControllerConfig) -> Result<Pod, PodBuildE
 
     let labels = BTreeMap::from([
         (SANDBOX_LABEL.to_string(), "true".to_string()),
-        ("microsandbox.dev/sandbox-name".to_string(), name.clone()),
+        (SANDBOX_NAME_LABEL.to_string(), name.clone()),
     ]);
 
     let mut containers = vec![runtime_container(
