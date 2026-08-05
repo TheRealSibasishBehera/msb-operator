@@ -1,13 +1,9 @@
 apiVersion: kuttl.dev/v1beta1
 kind: TestStep
 commands:
-  # shutdownTime is an absolute wall-clock deadline (unlike maxDurationSecs, which
-  # starts after boot). Allow enough margin for a cold boot to reach Running and
-  # be observed before the deadline fires.
+  # Far-future deadline so boot never races expiry; a later step arms a short
+  # deadline once Running is observed.
   - script: |
-      set -e
-      deadline=$(date -u -d '+120 seconds' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-                 || date -u -v+120S +%Y-%m-%dT%H:%M:%SZ)
       kubectl apply -n "$NAMESPACE" -f - <<EOF
       apiVersion: sandbox.microsandbox.dev/v1alpha1
       kind: Sandbox
@@ -20,5 +16,5 @@ commands:
         cmd: ["sleep", "3600"]
         runPolicy: Once
         lifecycle:
-          shutdownTime: "$deadline"
+          shutdownTime: "2999-01-01T00:00:00Z"
       EOF

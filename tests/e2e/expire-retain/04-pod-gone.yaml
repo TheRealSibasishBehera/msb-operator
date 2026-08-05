@@ -1,12 +1,12 @@
 apiVersion: kuttl.dev/v1beta1
 kind: TestStep
 commands:
-  # Expiry always deletes the pod, even under Retain.
+  # Expiry deletes the pod even under Retain; poll past its 30s termination grace.
   - script: |
-      for i in $(seq 1 15); do
+      for i in $(seq 1 30); do
         if ! kubectl get pod sandbox-e2e-expire-retain -n "$NAMESPACE" >/dev/null 2>&1; then
           echo "PASS: pod deleted on expiry"; exit 0
         fi
-        sleep 2
+        sleep 3
       done
       echo "FAIL: pod still present after expiry"; exit 1
