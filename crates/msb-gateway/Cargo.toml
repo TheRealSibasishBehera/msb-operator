@@ -1,0 +1,35 @@
+[package]
+name = "msb-gateway"
+description = "SDK-compatible gateway — terminates external exec-WS/logs and splices to the per-sandbox bridge."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+msb-crd = { path = "../msb-crd" }
+microsandbox-types = { workspace = true }
+chrono.workspace = true
+kube.workspace = true
+k8s-openapi = { version = "0.28", features = ["v1_32"], default-features = false }
+tokio.workspace = true
+tokio-tungstenite = "0.24"
+backon = "1.6"
+fastrand = "2.4"
+futures.workspace = true
+axum = { workspace = true, features = ["ws"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+
+[[bin]]
+name = "msb-gateway"
+path = "src/main.rs"

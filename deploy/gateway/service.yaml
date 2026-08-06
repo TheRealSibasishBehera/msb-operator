@@ -1,0 +1,14 @@
+# ClusterIP by design: external access is the cluster's own Ingress + TLS, never
+# baked in here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: msb-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: msb-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

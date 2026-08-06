@@ -1,0 +1,17 @@
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-sec-ok
+spec:
+  image: "alpine:3.20"
+  cpus: 1
+  memory: 512
+  cmd: ["sleep", "300"]
+  runPolicy: Once
+  secrets:
+    - env: API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: e2e-sec
+          key: token
+      allowedHosts: ["api.example.com"]

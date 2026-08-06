@@ -1,0 +1,11 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # Runs after Running is observed: arm the deadline from a known-live sandbox,
+  # independent of boot time.
+  - script: |
+      set -e
+      deadline=$(date -u -d '+20 seconds' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                 || date -u -v+20S +%Y-%m-%dT%H:%M:%SZ)
+      kubectl patch sandbox e2e-expire-delete -n "$NAMESPACE" --type=merge \
+        -p "{\"spec\":{\"lifecycle\":{\"shutdownTime\":\"$deadline\"}}}"

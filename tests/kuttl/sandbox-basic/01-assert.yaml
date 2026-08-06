@@ -1,0 +1,4 @@
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: test-basic

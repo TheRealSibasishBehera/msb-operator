@@ -1,0 +1,21 @@
+# Tenant roles: bind per-namespace with a RoleBinding to grant Sandbox access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-operator
+rules:
+  - apiGroups: ["sandbox.microsandbox.dev"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["sandbox.microsandbox.dev"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-viewer
+rules:
+  - apiGroups: ["sandbox.microsandbox.dev"]
+    resources: ["sandboxes", "sandboxes/status"]
+    verbs: ["get", "list", "watch"]

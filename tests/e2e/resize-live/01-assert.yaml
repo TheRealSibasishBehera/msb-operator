@@ -1,0 +1,10 @@
+# The sandbox boots and the controller marks it Running, recording the boot-time
+# effective cpus/memory as applied. kuttl polls until this matches (or times out).
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-resize
+status:
+  phase: Running
+  appliedCpus: 1
+  appliedMemory: 512

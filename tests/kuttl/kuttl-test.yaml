@@ -1,0 +1,10 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+# A testDir is a folder whose SUBDIRECTORIES are the cases (sandbox-basic,
+# sandbox-cel-immutable). Listing the case dirs here directly makes kuttl report
+# "0 tests" and pass without running anything.
+testDirs:
+  - ./tests/kuttl
+startKIND: false
+suppress: ["events"]
+timeout: 120

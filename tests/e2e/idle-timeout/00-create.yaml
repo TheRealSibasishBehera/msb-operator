@@ -1,0 +1,11 @@
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-idle
+spec:
+  # No cmd: the guest boots idle (waiting for exec), so only idleTimeoutSecs stops it.
+  image: "python:3.12"
+  cpus: 1
+  memory: 512
+  runPolicy: Once
+  idleTimeoutSecs: 8

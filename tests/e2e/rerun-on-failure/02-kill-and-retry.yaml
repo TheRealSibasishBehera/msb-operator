@@ -1,0 +1,27 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # Delete the running pod to simulate a node-loss / eviction. Under
+  # RerunOnFailure the controller must record NodeLost, increment restartCount,
+  # and boot a fresh pod back to Running.
+  - script: |
+      set -e
+      pod=$(kubectl get sandbox e2e-rerun -n $NAMESPACE -o jsonpath='{.status.podName}')
+      before=$(kubectl get sandbox e2e-rerun -n $NAMESPACE -o jsonpath='{.status.restartCount}')
+      before=${before:-0}
+      echo "killing pod $pod (restartCount before: $before)"
+      kubectl delete pod "$pod" -n $NAMESPACE --grace-period=0 --force >/dev/null 2>&1
+
+      # Poll for the retry: restartCount must climb and the sandbox must return to Running.
+      for i in $(seq 1 30); do
+        rc=$(kubectl get sandbox e2e-rerun -n $NAMESPACE -o jsonpath='{.status.restartCount}' 2>/dev/null)
+        ph=$(kubectl get sandbox e2e-rerun -n $NAMESPACE -o jsonpath='{.status.phase}' 2>/dev/null)
+        rc=${rc:-0}
+        if [ "$rc" -gt "$before" ] && [ "$ph" = "Running" ]; then
+          echo "PASS: restartCount $before -> $rc, phase back to Running after pod loss"
+          exit 0
+        fi
+        sleep 4
+      done
+      echo "FAIL: no retry observed (restartCount=$rc phase=$ph after 120s)"
+      exit 1

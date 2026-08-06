@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: msb-system
+  labels:
+    app.kubernetes.io/name: msb-operator
+    # The msb-daemon mounts hostPath (/dev/kvm + the device-plugin socket), which
+    # only privileged permits. Sandbox pods run restricted in their own namespaces;
+    # this label is the operator namespace only.
+    pod-security.kubernetes.io/enforce: privileged

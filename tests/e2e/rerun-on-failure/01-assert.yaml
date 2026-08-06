@@ -1,0 +1,6 @@
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-rerun
+status:
+  phase: Running

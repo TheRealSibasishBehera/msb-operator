@@ -1,0 +1,21 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # status.exposedPorts reflects the published port, and the per-sandbox Service
+  # carries it as port-8000 alongside the bridge's agent port.
+  - script: |
+      set -e
+      name=$(kubectl get sandbox e2e-ports -n "$NAMESPACE" \
+        -o jsonpath='{.status.exposedPorts[0].name}')
+      port=$(kubectl get sandbox e2e-ports -n "$NAMESPACE" \
+        -o jsonpath='{.status.exposedPorts[0].port}')
+      if [ "$name" != "port-8000" ] || [ "$port" != "8000" ]; then
+        echo "FAIL: status.exposedPorts wrong (name=$name port=$port)"; exit 1
+      fi
+      svc=$(kubectl get sandbox e2e-ports -n "$NAMESPACE" -o jsonpath='{.status.serviceName}')
+      sp=$(kubectl get svc "$svc" -n "$NAMESPACE" \
+        -o jsonpath='{.spec.ports[?(@.name=="port-8000")].port}')
+      if [ "$sp" != "8000" ]; then
+        echo "FAIL: Service $svc missing port-8000 (got '$sp')"; exit 1
+      fi
+      echo "PASS: exposedPorts + Service carry port-8000"

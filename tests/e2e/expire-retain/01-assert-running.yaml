@@ -1,0 +1,7 @@
+# Must run first, so the Expired phase proves the deadline stopped a live sandbox.
+apiVersion: sandbox.microsandbox.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: e2e-expire-retain
+status:
+  phase: Running

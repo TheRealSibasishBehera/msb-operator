@@ -1,0 +1,592 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxes.sandbox.microsandbox.dev
+spec:
+  group: sandbox.microsandbox.dev
+  names:
+    categories: []
+    kind: Sandbox
+    plural: sandboxes
+    shortNames:
+    - sb
+    singular: sandbox
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.restartCount
+      name: Restarts
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.terminationReason
+      name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.exitCode
+      name: Exit
+      priority: 1
+      type: integer
+    - jsonPath: .status.nodeName
+      name: Node
+      priority: 1
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for SandboxSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              cmd:
+                description: Command to run inside the guest. Defaults to the image entrypoint. This field is immutable.
+                items:
+                  type: string
+                type: array
+              cpus:
+                default: 1
+                description: |-
+                  Number of vCPUs. Mutable, up to maxCpus: raising it live-resizes a running
+                  sandbox over the control socket when there is boot headroom, otherwise the
+                  sandbox needs a restart to apply it.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              desiredState:
+                default: Running
+                description: |-
+                  Desired lifecycle state. `Stopped` removes the pod but keeps the Sandbox,
+                  restartable by setting `Running`. On the current storage model a restart is
+                  a fresh boot (guest state is not preserved). Mutable.
+                enum:
+                - Running
+                - Stopped
+                type: string
+              entrypoint:
+                description: Override the image entrypoint. Empty keeps the image's own entrypoint. This field is immutable.
+                items:
+                  type: string
+                type: array
+              env:
+                description: Plain (non-secret) environment variables set in the guest. This field is immutable.
+                items:
+                  description: A plain (non-secret) environment variable set in the guest.
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
+              hostname:
+                description: Guest hostname. This field is immutable.
+                nullable: true
+                type: string
+              idleTimeoutSecs:
+                description: Stop the sandbox after this many seconds with no activity. This field is immutable.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              image:
+                description: OCI image for the guest root filesystem. This field is immutable.
+                type: string
+              lifecycle:
+                default:
+                  shutdownPolicy: Retain
+                description: |-
+                  Wall-clock expiry deadline and policy. Distinct from
+                  `maxDurationSecs`/`idleTimeoutSecs`, which bound the guest's own runtime.
+                properties:
+                  shutdownPolicy:
+                    default: Retain
+                    description: |-
+                      What happens to the Sandbox object at expiry. Its pod and Service are
+                      always deleted; this governs the object itself. Mutable.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                  shutdownTime:
+                    description: |-
+                      Absolute time the sandbox expires. Unset means it never expires on a
+                      schedule. Mutable: adjust or clear it to extend, shorten, or cancel expiry.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
+              logging:
+                default:
+                  guestConsole: false
+                description: Guest console log capture, opt-in. This field is immutable.
+                properties:
+                  guestConsole:
+                    default: false
+                    type: boolean
+                type: object
+              maxCpus:
+                description: |-
+                  Boot-time vCPU ceiling. Unset defaults to `cpus` (no live-resize headroom).
+                  This field is immutable: the VMM reserves vCPU slots for this count at
+                  boot, so raising it after boot requires a new pod.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              maxDurationSecs:
+                description: Hard cap on total sandbox lifetime, in seconds. This field is immutable.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              maxMemory:
+                description: |-
+                  Boot-time memory ceiling in MiB. Unset defaults to `memory` (no
+                  live-resize headroom). This field is immutable: the VMM reserves the
+                  virtio-mem hotplug region for this size at boot, so raising it after boot
+                  requires a new pod.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              memory:
+                default: 512
+                description: |-
+                  Memory in MiB. Mutable, up to maxMemory: raising it live-resizes a running
+                  sandbox over the control socket when there is boot headroom, otherwise the
+                  sandbox needs a restart to apply it.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              network:
+                default:
+                  dns:
+                    queryTimeoutMs: 5000
+                    rebindProtection: true
+                  enabled: true
+                  maxConnections: 256
+                  policy:
+                    preset: publicOnly
+                  tls:
+                    intercept: false
+                  trustHostCas: false
+                description: Network configuration. This field is immutable.
+                properties:
+                  dns:
+                    default:
+                      queryTimeoutMs: 5000
+                      rebindProtection: true
+                    properties:
+                      nameservers:
+                        items:
+                          type: string
+                        type: array
+                      queryTimeoutMs:
+                        default: 5000
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      rebindProtection:
+                        default: true
+                        type: boolean
+                    type: object
+                  enabled:
+                    default: true
+                    description: Disable the smoltcp proxy entirely.
+                    type: boolean
+                  maxConnections:
+                    default: 256
+                    description: Maximum concurrent guest TCP connections.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  policy:
+                    default:
+                      preset: publicOnly
+                    properties:
+                      preset:
+                        default: publicOnly
+                        enum:
+                        - publicOnly
+                        - allowAll
+                        - denyAll
+                        - nonLocal
+                        type: string
+                    type: object
+                  publishedPorts:
+                    description: Guest ports to expose on the Pod IP.
+                    items:
+                      properties:
+                        guestPort:
+                          description: Port the guest listens on.
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          type: integer
+                        hostBind:
+                          default: 0.0.0.0
+                          description: |-
+                            Pod-side bind address. Defaults to `0.0.0.0` so the port is reachable on
+                            the Pod IP (msb's own default is loopback, which is unreachable in a pod).
+                          type: string
+                        hostPort:
+                          description: Port exposed on the pod. Defaults to `guest_port`.
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
+                        protocol:
+                          default: TCP
+                          enum:
+                          - TCP
+                          - UDP
+                          type: string
+                      required:
+                      - guestPort
+                      type: object
+                    type: array
+                  tls:
+                    default:
+                      intercept: false
+                    properties:
+                      intercept:
+                        default: false
+                        type: boolean
+                      interceptedPorts:
+                        items:
+                          properties:
+                            port:
+                              format: uint16
+                              maximum: 65535.0
+                              minimum: 0.0
+                              type: integer
+                          required:
+                          - port
+                          type: object
+                        type: array
+                    type: object
+                  trustHostCas:
+                    default: false
+                    description: Copy host trusted CAs into the guest.
+                    type: boolean
+                type: object
+              rlimits:
+                description: POSIX resource limits applied to guest processes at agentd startup. This field is immutable.
+                items:
+                  description: A POSIX resource limit applied to guest processes.
+                  properties:
+                    hard:
+                      description: Hard ceiling.
+                      format: uint64
+                      minimum: 0.0
+                      type: integer
+                    resource:
+                      description: The POSIX resource an `Rlimit` bounds (the `RLIMIT_*` family).
+                      enum:
+                      - Cpu
+                      - Fsize
+                      - Data
+                      - Stack
+                      - Core
+                      - Rss
+                      - Nproc
+                      - Nofile
+                      - Memlock
+                      - As
+                      - Locks
+                      - Sigpending
+                      - Msgqueue
+                      - Nice
+                      - Rtprio
+                      - Rttime
+                      type: string
+                    soft:
+                      description: Soft limit; the process may raise it up to `hard`.
+                      format: uint64
+                      minimum: 0.0
+                      type: integer
+                  required:
+                  - hard
+                  - resource
+                  - soft
+                  type: object
+                type: array
+              runPolicy:
+                default: Once
+                description: Restart policy on failure. This field is immutable.
+                enum:
+                - Once
+                - RerunOnFailure
+                type: string
+              secrets:
+                description: Secrets injected as env vars inside the guest via the smoltcp proxy. This field is immutable.
+                items:
+                  properties:
+                    allowedHosts:
+                      description: Hosts the proxy is permitted to substitute this value to.
+                      items:
+                        type: string
+                      type: array
+                    env:
+                      description: Environment variable name the guest sees (set to the placeholder value).
+                      type: string
+                    valueFrom:
+                      description: Source of the secret value.
+                      properties:
+                        secretKeyRef:
+                          properties:
+                            key:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - secretKeyRef
+                      type: object
+                  required:
+                  - env
+                  - valueFrom
+                  type: object
+                type: array
+              securityProfile:
+                default: Default
+                description: In-guest hardening applied to exec sessions. This field is immutable.
+                enum:
+                - Default
+                - Restricted
+                type: string
+              shell:
+                description: Default shell for guest sessions. This field is immutable.
+                nullable: true
+                type: string
+              upper:
+                default:
+                  size: 4Gi
+                description: Writable overlay layer configuration. This field is immutable.
+                properties:
+                  size:
+                    default: 4Gi
+                    description: |-
+                      Writable overlay size for the guest root, as a Kubernetes
+                      `resource.Quantity` (e.g. `4Gi`, `512Mi`).
+                    nullable: true
+                    x-kubernetes-int-or-string: true
+                type: object
+              user:
+                description: User the guest workload runs as (name, uid, or `uid:gid`). This field is immutable.
+                nullable: true
+                type: string
+              workdir:
+                description: |-
+                  Working directory for guest commands. Must already exist in the image, or
+                  the sandbox fails to boot. This field is immutable.
+                nullable: true
+                type: string
+            required:
+            - image
+            type: object
+            x-kubernetes-validations:
+            - message: spec.cpus must not exceed spec.maxCpus
+              rule: 'self.cpus <= (has(self.maxCpus) ? self.maxCpus : self.cpus)'
+            - message: spec.memory must not exceed spec.maxMemory
+              rule: 'self.memory <= (has(self.maxMemory) ? self.maxMemory : self.memory)'
+            - message: spec.cmd is immutable after creation
+              rule: has(oldSelf.cmd) == has(self.cmd) && (!has(self.cmd) || self.cmd == oldSelf.cmd)
+            - message: spec.entrypoint is immutable after creation
+              rule: has(oldSelf.entrypoint) == has(self.entrypoint) && (!has(self.entrypoint) || self.entrypoint == oldSelf.entrypoint)
+            - message: spec.env is immutable after creation
+              rule: has(oldSelf.env) == has(self.env) && (!has(self.env) || self.env == oldSelf.env)
+            - message: spec.hostname is immutable after creation
+              rule: has(oldSelf.hostname) == has(self.hostname) && (!has(self.hostname) || self.hostname == oldSelf.hostname)
+            - message: spec.idleTimeoutSecs is immutable after creation
+              rule: has(oldSelf.idleTimeoutSecs) == has(self.idleTimeoutSecs) && (!has(self.idleTimeoutSecs) || self.idleTimeoutSecs == oldSelf.idleTimeoutSecs)
+            - message: spec.image is immutable after creation
+              rule: has(oldSelf.image) == has(self.image) && (!has(self.image) || self.image == oldSelf.image)
+            - message: spec.logging is immutable after creation
+              rule: has(oldSelf.logging) == has(self.logging) && (!has(self.logging) || self.logging == oldSelf.logging)
+            - message: spec.maxCpus is immutable after creation
+              rule: has(oldSelf.maxCpus) == has(self.maxCpus) && (!has(self.maxCpus) || self.maxCpus == oldSelf.maxCpus)
+            - message: spec.maxDurationSecs is immutable after creation
+              rule: has(oldSelf.maxDurationSecs) == has(self.maxDurationSecs) && (!has(self.maxDurationSecs) || self.maxDurationSecs == oldSelf.maxDurationSecs)
+            - message: spec.maxMemory is immutable after creation
+              rule: has(oldSelf.maxMemory) == has(self.maxMemory) && (!has(self.maxMemory) || self.maxMemory == oldSelf.maxMemory)
+            - message: spec.network is immutable after creation
+              rule: has(oldSelf.network) == has(self.network) && (!has(self.network) || self.network == oldSelf.network)
+            - message: spec.rlimits is immutable after creation
+              rule: has(oldSelf.rlimits) == has(self.rlimits) && (!has(self.rlimits) || self.rlimits == oldSelf.rlimits)
+            - message: spec.runPolicy is immutable after creation
+              rule: has(oldSelf.runPolicy) == has(self.runPolicy) && (!has(self.runPolicy) || self.runPolicy == oldSelf.runPolicy)
+            - message: spec.secrets is immutable after creation
+              rule: has(oldSelf.secrets) == has(self.secrets) && (!has(self.secrets) || self.secrets == oldSelf.secrets)
+            - message: spec.securityProfile is immutable after creation
+              rule: has(oldSelf.securityProfile) == has(self.securityProfile) && (!has(self.securityProfile) || self.securityProfile == oldSelf.securityProfile)
+            - message: spec.shell is immutable after creation
+              rule: has(oldSelf.shell) == has(self.shell) && (!has(self.shell) || self.shell == oldSelf.shell)
+            - message: spec.upper is immutable after creation
+              rule: has(oldSelf.upper) == has(self.upper) && (!has(self.upper) || self.upper == oldSelf.upper)
+            - message: spec.user is immutable after creation
+              rule: has(oldSelf.user) == has(self.user) && (!has(self.user) || self.user == oldSelf.user)
+            - message: spec.workdir is immutable after creation
+              rule: has(oldSelf.workdir) == has(self.workdir) && (!has(self.workdir) || self.workdir == oldSelf.workdir)
+          status:
+            nullable: true
+            properties:
+              appliedCpus:
+                description: |-
+                  The `cpus`/`memory` values last confirmed applied to the running guest —
+                  either at boot or via a live resize. Diverges from `spec.cpus`/`spec.memory`
+                  when an edit is pending a live resize or is `RestartRequired`.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              appliedMemory:
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              exitCode:
+                format: int32
+                nullable: true
+                type: integer
+              exposedPorts:
+                description: |-
+                  Ports exposed on the per-sandbox Service, reflected so `kubectl describe`
+                  shows where a guest listener is reachable.
+                items:
+                  description: A port reachable on the per-sandbox Service.
+                  properties:
+                    name:
+                      description: The Service port name, referenceable by Ingress/Istio.
+                      type: string
+                    port:
+                      description: Port on the Service (and Pod).
+                      format: uint16
+                      maximum: 65535.0
+                      minimum: 0.0
+                      type: integer
+                    protocol:
+                      enum:
+                      - TCP
+                      - UDP
+                      type: string
+                  required:
+                  - name
+                  - port
+                  - protocol
+                  type: object
+                type: array
+              nodeName:
+                nullable: true
+                type: string
+              phase:
+                description: High-level lifecycle phase the controller writes to `.status.phase`.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - Stopped
+                nullable: true
+                type: string
+              podName:
+                nullable: true
+                type: string
+              restartCount:
+                default: 0
+                description: |-
+                  Times the pod has been recreated under `runPolicy: RerunOnFailure`. Drives
+                  the requeue backoff and is surfaced so users can see a sandbox is looping.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              serviceName:
+                description: |-
+                  Name of the per-sandbox ClusterIP Service. Hashed, so not guessable —
+                  clients read it here to reach the sandbox's bridge.
+                nullable: true
+                type: string
+              startedAt:
+                description: When the guest reached Running, as a Kubernetes `metav1.Time` (RFC3339).
+                format: date-time
+                nullable: true
+                type: string
+              terminatedAt:
+                description: When the guest terminated, as a Kubernetes `metav1.Time` (RFC3339).
+                format: date-time
+                nullable: true
+                type: string
+              terminationReason:
+                description: |-
+                  Why the sandbox ended, derived by the controller from the runtime container's
+                  terminated state.
+                enum:
+                - Completed
+                - MaxDurationExceeded
+                - IdleTimeout
+                - ShutdownRequested
+                - Failed
+                - OOMKilled
+                - Evicted
+                - NodeLost
+                - Expired
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Sandbox
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

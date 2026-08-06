@@ -1,0 +1,10 @@
+# Boots real sandboxes; requires KVM. Run via tests/e2e/run.sh.
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+testDirs:
+  - ./tests/e2e
+# Serial: cases kill pods, which must not race a neighbour's reconcile.
+parallel: 1
+# Cold microVM boot plus reconcile can take ~60-90s.
+timeout: 180
+suppress: ["events"]

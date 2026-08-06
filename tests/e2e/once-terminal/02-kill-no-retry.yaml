@@ -1,0 +1,30 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  # The counterpart to rerun-on-failure: under Once, a killed running pod must
+  # settle terminal Failed (reason NodeLost) and NOT be recreated.
+  - script: |
+      set -e
+      pod=$(kubectl get sandbox e2e-once -n $NAMESPACE -o jsonpath='{.status.podName}')
+      echo "killing pod $pod under runPolicy: Once"
+      kubectl delete pod "$pod" -n $NAMESPACE --grace-period=0 --force >/dev/null 2>&1
+
+      # Wait for the sandbox to settle Failed.
+      settled=""
+      for i in $(seq 1 20); do
+        ph=$(kubectl get sandbox e2e-once -n $NAMESPACE -o jsonpath='{.status.phase}' 2>/dev/null)
+        if [ "$ph" = "Failed" ]; then settled=1; break; fi
+        sleep 4
+      done
+      if [ -z "$settled" ]; then echo "FAIL: did not settle Failed (phase=$ph)"; exit 1; fi
+
+      reason=$(kubectl get sandbox e2e-once -n $NAMESPACE -o jsonpath='{.status.terminationReason}')
+      rc=$(kubectl get sandbox e2e-once -n $NAMESPACE -o jsonpath='{.status.restartCount}')
+      rc=${rc:-0}
+
+      # Must NOT retry: give it time and confirm no new pod appears and it stays Failed.
+      sleep 12
+      ph=$(kubectl get sandbox e2e-once -n $NAMESPACE -o jsonpath='{.status.phase}')
+      if [ "$ph" != "Failed" ]; then echo "FAIL: Once retried (phase=$ph)"; exit 1; fi
+      if [ "$rc" != "0" ]; then echo "FAIL: Once incremented restartCount ($rc)"; exit 1; fi
+      echo "PASS: Once settled Failed (reason=$reason), no retry, restartCount=$rc"

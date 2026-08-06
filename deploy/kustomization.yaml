@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: msb-system
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: msb-operator
+
+resources:
+  - namespace.yaml
+  - crds/sandboxes.yaml
+  # Generated: cargo xtask generate-rbac.
+  - rbac/controller-clusterrole.yaml
+  - rbac/controller-serviceaccount.yaml
+  - controller/aggregated-roles.yaml
+  - controller/deployment.yaml
+  - daemon/rbac.yaml
+  - daemon/daemonset.yaml
+
+# Does not reach the controller's MSB_RUNTIME_IMAGE/MSB_BRIDGE_IMAGE env values
+# (not container images); bump those in controller/deployment.yaml too.
+images:
+  - name: ghcr.io/superradcompany/msb-controller
+    newTag: "0.1.0"
+  - name: ghcr.io/superradcompany/msb-daemon
+    newTag: "0.1.0"
